@@ -1,0 +1,1338 @@
+--- a/net/batman-adv/Kconfig	2026-02-24 09:23:32.000000000 -0600
++++ b/net/batman-adv/Kconfig	2026-03-05 18:37:58.449678145 -0600
+@@ -82,3 +82,21 @@
+ 	  messages using the generic tracing infrastructure of the kernel.
+ 	  BATMAN_ADV_DEBUG must also be selected to get trace events for
+ 	  batadv_dbg.
++
++config BATMAN_ADV_NSS
++	bool "B.A.T.M.A.N. NSS datapath hooks"
++	depends on BATMAN_ADV
++	default n
++	help
++	  Adds NSS integration hook points to the batman-adv datapath.
++	  The initial implementation is a no-op and keeps the existing
++	  software forwarding path unchanged until NSS handlers are
++	  implemented.
++
++config BATMAN_ADV_NSS_PERF_PROFILE
++	bool "B.A.T.M.A.N. NSS performance profile"
++	depends on BATMAN_ADV_NSS
++	default y
++	help
++	  Enables additional high-performance NSS datapath options with
++	  reduced safety/readability tradeoffs. Enabled by default.
+--- a/net/batman-adv/Makefile	2026-02-24 09:23:32.000000000 -0600
++++ b/net/batman-adv/Makefile	2026-03-05 18:37:58.449678145 -0600
+@@ -26,6 +26,10 @@
+ batman-adv-y += originator.o
+ batman-adv-y += routing.o
+ batman-adv-y += send.o
++batman-adv-$(CONFIG_BATMAN_ADV_NSS) += nss.o
++batman-adv-$(CONFIG_BATMAN_ADV_NSS) += nss_policy.o
++batman-adv-$(CONFIG_BATMAN_ADV_NSS) += nss_rx.o
++batman-adv-$(CONFIG_BATMAN_ADV_NSS) += nss_tx.o
+ batman-adv-$(CONFIG_BATMAN_ADV_TRACING) += trace.o
+ batman-adv-y += tp_meter.o
+ batman-adv-y += translation-table.o
+--- a/net/batman-adv/hard-interface.c	2026-03-05 18:36:58.334707247 -0600
++++ b/net/batman-adv/hard-interface.c	2026-03-05 18:37:58.449678145 -0600
+@@ -38,6 +38,7 @@
+ #include "gateway_client.h"
+ #include "log.h"
+ #include "mesh-interface.h"
++#include "nss.h"
+ #include "originator.h"
+ #include "send.h"
+ #include "translation-table.h"
+@@ -742,6 +743,8 @@
+ 	hard_iface->batman_adv_ptype.dev = hard_iface->net_dev;
+ 	dev_add_pack(&hard_iface->batman_adv_ptype);
+ 
++	batadv_nss_if_init(hard_iface);
++
+ 	batadv_info(hard_iface->mesh_iface, "Adding interface: %s\n",
+ 		    hard_iface->net_dev->name);
+ 
+@@ -825,6 +828,8 @@
+ 
+ 	batadv_info(hard_iface->mesh_iface, "Removing interface: %s\n",
+ 		    hard_iface->net_dev->name);
++	batadv_nss_if_deinit(hard_iface);
++
+ 	dev_remove_pack(&hard_iface->batman_adv_ptype);
+ 	batadv_hardif_put(hard_iface);
+ 
+--- a/net/batman-adv/mesh-interface.c	2026-02-24 09:23:32.000000000 -0600
++++ b/net/batman-adv/mesh-interface.c	2026-03-05 18:37:58.449678145 -0600
+@@ -945,6 +945,46 @@
+ 	{ "dat_put_rx" },
+ 	{ "dat_cached_reply_tx" },
+ #endif
++#ifdef CONFIG_BATMAN_ADV_NSS
++	{ "nss_tx_attempt" },
++	{ "nss_tx_success" },
++	{ "nss_tx_fallback" },
++	{ "nss_tx_bypass_noctx" },
++	{ "nss_tx_bypass_noctx_init" },
++	{ "nss_tx_bypass_noctx_create_fail" },
++	{ "nss_tx_bypass_disabled" },
++	{ "nss_tx_bypass_ifname" },
++	{ "nss_tx_bypass_wifi" },
++	{ "nss_tx_bypass_wifi_policy" },
++	{ "nss_tx_byp_wifi_pol_trunc" },
++	{ "nss_tx_byp_wifi_pol_nonuc" },
++	{ "nss_tx_byp_wifi_pol_u4_nd" },
++	{ "nss_tx_byp_wifi_pol_u4_ctl" },
++	{ "nss_tx_byp_wifi_pol_ctl_nonuc" },
++	{ "nss_tx_byp_wifi_pol_ctl_iv_ogm" },
++	{ "nss_tx_byp_wifi_pol_ctl_ogm2" },
++	{ "nss_tx_byp_wifi_pol_ctl_elp" },
++	{ "nss_tx_byp_wifi_pol_ctl_coded" },
++	{ "nss_tx_wifi_seen_ctl_nonuc" },
++	{ "nss_tx_wifi_seen_ctl_iv_ogm" },
++	{ "nss_tx_wifi_seen_ctl_ogm2" },
++	{ "nss_tx_wifi_seen_ctl_elp" },
++	{ "nss_tx_wifi_seen_ctl_coded" },
++	{ "nss_tx_bypass_wifi_submit" },
++	{ "nss_tx_bypass_mcast" },
++	{ "nss_tx_bypass_nonlinear" },
++	{ "nss_tx_nonlinear_copy" },
++	{ "nss_tx_nonlinear_copy_fail" },
++	{ "nss_tx_nonlinear_linearize_fail" },
++	{ "nss_tx_clone_fail" },
++	{ "nss_tx_submit_fail" },
++	{ "nss_tx_bypass_submit_cooldown" },
++	{ "nss_rx_exception" },
++	{ "nss_rx_exception_drop" },
++	{ "nss_rx_exception_drop_mark_echo" },
++	{ "nss_rx_exception_drop_src_echo" },
++	{ "nss_rx_exception_reinject" },
++#endif
+ };
+ 
+ static void batadv_get_strings(struct net_device *dev, u32 stringset, u8 *data)
+--- /dev/null	2026-02-26 01:46:56.076000000 -0600
++++ b/net/batman-adv/nss.c	2026-03-05 18:37:58.449678145 -0600
+@@ -0,0 +1,170 @@
++// SPDX-License-Identifier: GPL-2.0
++/* Copyright (C) B.A.T.M.A.N. contributors:
++ *
++ * Marek Lindner, Simon Wunderlich
++ */
++
++#include "nss.h"
++
++#include <linux/atomic.h>
++#include <linux/delay.h>
++#include <linux/jiffies.h>
++
++#include <nss_api_if.h>
++
++#include "hard-interface.h"
++#include "nss_internal.h"
++
++void batadv_nss_if_init(struct batadv_hard_iface *hard_iface)
++{
++	enum nss_dynamic_interface_type src_if_type;
++	int32_t if_num_h2n;
++	int32_t src_if_num;
++	nss_tx_status_t nh_status;
++	uint32_t nh_if_num;
++	uint32_t nexthop_h2n;
++
++	if (READ_ONCE(hard_iface->nssctx))
++		return;
++
++	if (atomic_cmpxchg(&hard_iface->nssctx_init_in_progress, 0, 1))
++		return;
++
++	if (READ_ONCE(hard_iface->nssctx))
++		goto out_init_unlock;
++
++	if (!batadv_nss_ifname_allowed(hard_iface))
++		goto out_init_unlock;
++
++	if (!batadv_nss_hardif_supported(hard_iface))
++		goto out_init_unlock;
++
++	if (batadv_is_wifi_hardif(hard_iface) &&
++	    !batadv_nss_offload_wifi_create)
++		goto out_init_unlock;
++
++	hard_iface->nssctx_create_failed = false;
++	WRITE_ONCE(hard_iface->nssctx_teardown, false);
++	atomic_set(&hard_iface->nssctx_users, 0);
++	hard_iface->nssctx_dev_held = false;
++	hard_iface->nssctx_last_create_jiffies = jiffies;
++	hard_iface->nssctx_submit_failed = false;
++	hard_iface->nssctx_last_submit_fail_jiffies = 0;
++	hard_iface->nss_policy_cache_expires = 0;
++	hard_iface->nss_policy_ifname_allowed = false;
++	hard_iface->nss_policy_hardif_supported = false;
++	hard_iface->nss_policy_wifi_submit_allowed = false;
++
++	nexthop_h2n = NSS_ETH_RX_INTERFACE;
++	if_num_h2n = nss_cmn_get_interface_number_by_dev(hard_iface->net_dev);
++	if (if_num_h2n >= 0)
++		nexthop_h2n = (uint32_t)if_num_h2n;
++
++	hard_iface->nssctx = nss_virt_if_create_sync_nexthop(hard_iface->net_dev,
++							      NSS_N2H_INTERFACE,
++							      nexthop_h2n);
++	if (hard_iface->nssctx && if_num_h2n < 0)
++		pr_debug("Using NSS_ETH_RX_INTERFACE as h2n nexthop for %s\n",
++			 hard_iface->net_dev->name);
++	if (!hard_iface->nssctx) {
++		hard_iface->nssctx_create_failed = true;
++		pr_warn("Unable to create NSS virtual interface for %s\n",
++			hard_iface->net_dev->name);
++	}
++
++	if (hard_iface->nssctx)
++		nss_virt_if_register(hard_iface->nssctx, batadv_nss_receive_from_nss,
++				     hard_iface->net_dev);
++	if (hard_iface->nssctx)
++		hard_iface->nssctx_dev_held = true;
++
++	if (!hard_iface->nssctx)
++		goto out_init_unlock;
++
++	src_if_num = if_num_h2n;
++	if (src_if_num < 0)
++		goto out_init_unlock;
++
++	/*
++	 * nss_if_set_nexthop() is valid for physical interfaces and VAP dynamic
++	 * interfaces. For wifi mesh dynamic interfaces the firmware rejects this
++	 * message (NSS_TX_FAILURE), so skip programming and keep software path.
++	 */
++	if (nss_is_dynamic_interface((uint32_t)src_if_num)) {
++		src_if_type = nss_dynamic_interface_get_type(hard_iface->nssctx->nss_ctx,
++							    src_if_num);
++		if (src_if_type != NSS_DYNAMIC_INTERFACE_TYPE_VAP)
++			goto out_init_unlock;
++	}
++
++	nh_if_num = hard_iface->nssctx->if_num_n2h;
++	nh_status = nss_if_set_nexthop(hard_iface->nssctx->nss_ctx,
++				       (uint32_t)src_if_num,
++				       nh_if_num);
++	if (nh_status != NSS_TX_SUCCESS)
++		pr_warn("Unable to set NSS nexthop for %s if_num %d -> %u: %d\n",
++			hard_iface->net_dev->name, src_if_num, nh_if_num, nh_status);
++
++out_init_unlock:
++	atomic_set(&hard_iface->nssctx_init_in_progress, 0);
++}
++
++void batadv_nss_if_deinit(struct batadv_hard_iface *hard_iface)
++{
++	struct nss_virt_if_handle *nssctx = hard_iface->nssctx;
++	int32_t src_if_num;
++	nss_tx_status_t status;
++	unsigned int wait_tries = 0;
++
++	nssctx = xchg(&hard_iface->nssctx, NULL);
++
++	if (!nssctx)
++		return;
++	WRITE_ONCE(hard_iface->nssctx_teardown, true);
++	smp_mb();
++
++	hard_iface->nssctx_create_failed = false;
++	hard_iface->nssctx_last_create_jiffies = 0;
++	hard_iface->nssctx_submit_failed = false;
++	hard_iface->nssctx_last_submit_fail_jiffies = 0;
++	hard_iface->nss_policy_cache_expires = 0;
++
++	while (atomic_read(&hard_iface->nssctx_users) > 0 && wait_tries < 5000) {
++		usleep_range(1000, 2000);
++		wait_tries++;
++	}
++	if (atomic_read(&hard_iface->nssctx_users) > 0) {
++		WRITE_ONCE(hard_iface->nssctx, nssctx);
++		WRITE_ONCE(hard_iface->nssctx_teardown, false);
++		pr_warn("Skipping NSS teardown for %s while %d users still in-flight\n",
++			hard_iface->net_dev->name,
++			atomic_read(&hard_iface->nssctx_users));
++		return;
++	}
++
++	src_if_num = nss_cmn_get_interface_number_by_dev(hard_iface->net_dev);
++	if (src_if_num >= 0)
++		nss_if_reset_nexthop(nssctx->nss_ctx, (uint32_t)src_if_num);
++
++	for (wait_tries = 0; wait_tries < 4000; wait_tries++) {
++		status = nss_virt_if_destroy_sync(nssctx);
++		if (status == NSS_TX_SUCCESS)
++			break;
++		usleep_range(2000, 4000);
++	}
++	if (status != NSS_TX_SUCCESS)
++		pr_warn("Unable to destroy NSS virtual interface for %s after %u retries: %d\n",
++			hard_iface->net_dev->name, wait_tries, status);
++
++	if (status == NSS_TX_SUCCESS) {
++		hard_iface->nssctx_dev_held = false;
++	} else if (status == NSS_TX_FAILURE_BAD_PARAM &&
++		   hard_iface->nssctx_dev_held) {
++		dev_put(hard_iface->net_dev);
++		hard_iface->nssctx_dev_held = false;
++		pr_warn("Compensated NSS netdev reference on destroy failure for %s\n",
++			hard_iface->net_dev->name);
++	}
++
++	WRITE_ONCE(hard_iface->nssctx_teardown, false);
++}
+--- /dev/null	2026-02-26 01:46:56.076000000 -0600
++++ b/net/batman-adv/nss.h	2026-03-05 18:37:58.449678145 -0600
+@@ -0,0 +1,41 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/* Copyright (C) B.A.T.M.A.N. contributors:
++ *
++ * Marek Lindner, Simon Wunderlich
++ */
++
++#ifndef _NET_BATMAN_ADV_NSS_H_
++#define _NET_BATMAN_ADV_NSS_H_
++
++#include "main.h"
++
++#ifdef CONFIG_BATMAN_ADV_NSS
++void batadv_nss_if_init(struct batadv_hard_iface *hard_iface);
++void batadv_nss_if_deinit(struct batadv_hard_iface *hard_iface);
++bool batadv_nss_xmit(struct sk_buff *skb,
++		     struct batadv_hard_iface *hard_iface,
++		     const u8 *dst_addr, int *ret);
++#else
++static inline void batadv_nss_if_init(struct batadv_hard_iface *hard_iface)
++{
++	(void)hard_iface;
++}
++
++static inline void batadv_nss_if_deinit(struct batadv_hard_iface *hard_iface)
++{
++	(void)hard_iface;
++}
++
++static inline bool batadv_nss_xmit(struct sk_buff *skb,
++				   struct batadv_hard_iface *hard_iface,
++				   const u8 *dst_addr, int *ret)
++{
++	(void)skb;
++	(void)hard_iface;
++	(void)dst_addr;
++	(void)ret;
++	return false;
++}
++#endif
++
++#endif /* _NET_BATMAN_ADV_NSS_H_ */
+--- /dev/null	2026-02-26 01:46:56.076000000 -0600
++++ b/net/batman-adv/nss_internal.h	2026-03-05 18:37:58.449678145 -0600
+@@ -0,0 +1,77 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/* Copyright (C) B.A.T.M.A.N. contributors */
++
++#ifndef _NET_BATMAN_ADV_NSS_INTERNAL_H_
++#define _NET_BATMAN_ADV_NSS_INTERNAL_H_
++
++#include "main.h"
++
++#include <linux/atomic.h>
++#include <linux/jiffies.h>
++#include <linux/types.h>
++
++extern bool batadv_nss_offload_enable;
++extern bool batadv_nss_offload_allow_mcast;
++extern bool batadv_nss_offload_nonlinear_copy;
++extern bool batadv_nss_offload_lazy_init;
++extern unsigned int batadv_nss_offload_submit_retry_ms;
++#if IS_ENABLED(CONFIG_BATMAN_ADV_NSS_PERF_PROFILE)
++extern bool batadv_nss_offload_direct_submit;
++extern bool batadv_nss_offload_direct_submit_unlock;
++#endif
++
++extern bool batadv_nss_offload_wifi_submit;
++extern bool batadv_nss_offload_wifi_create;
++
++#define BATADV_NSS_OFFLOAD_POLICY_CACHE_MS_DEFAULT 1000
++
++enum batadv_nss_wifi_policy_reason {
++	BATADV_NSS_WIFI_POLICY_OK = 0,
++	BATADV_NSS_WIFI_POLICY_TRUNC,
++	BATADV_NSS_WIFI_POLICY_NONUNICAST,
++	BATADV_NSS_WIFI_POLICY_U4_CONTROL,
++	BATADV_NSS_WIFI_POLICY_U4_NONDATA,
++};
++
++struct batadv_nss_wifi_policy_result {
++	bool allowed;
++	enum batadv_nss_wifi_policy_reason reason;
++	u8 packet_type;
++	u8 subtype;
++	bool control_nonuc;
++};
++
++void batadv_nss_receive_from_nss(struct net_device *dev,
++				 struct sk_buff *skb,
++				 struct napi_struct *napi);
++
++bool batadv_nss_ifname_allowed(struct batadv_hard_iface *hard_iface);
++bool batadv_nss_hardif_supported(struct batadv_hard_iface *hard_iface);
++bool batadv_nss_wifi_submit_allowed(struct batadv_hard_iface *hard_iface);
++bool batadv_nss_lazy_retry_allowed(struct batadv_hard_iface *hard_iface);
++void batadv_nss_policy_cache_refresh(struct batadv_hard_iface *hard_iface);
++
++static inline bool
++batadv_nss_policy_cache_valid(struct batadv_hard_iface *hard_iface,
++			      unsigned long now)
++{
++	return time_before(now, READ_ONCE(hard_iface->nss_policy_cache_expires));
++}
++
++static inline bool batadv_nss_direct_submit_active(void)
++{
++#if IS_ENABLED(CONFIG_BATMAN_ADV_NSS_PERF_PROFILE)
++	return batadv_nss_offload_direct_submit &&
++	       batadv_nss_offload_direct_submit_unlock;
++#else
++	return false;
++#endif
++}
++
++void batadv_nss_wifi_classify(struct sk_buff *skb,
++			      struct batadv_nss_wifi_policy_result *result);
++void batadv_nss_wifi_policy_count(struct batadv_priv *bat_priv,
++				  enum batadv_nss_wifi_policy_reason reason,
++				  const struct batadv_nss_wifi_policy_result *result);
++
++#endif /* _NET_BATMAN_ADV_NSS_INTERNAL_H_ */
+--- /dev/null	2026-02-26 01:46:56.076000000 -0600
++++ b/net/batman-adv/nss_policy.c	2026-03-05 18:37:58.449678145 -0600
+@@ -0,0 +1,347 @@
++// SPDX-License-Identifier: GPL-2.0
++/* Copyright (C) B.A.T.M.A.N. contributors */
++
++#include "nss_internal.h"
++
++#include <linux/atomic.h>
++#include <linux/bitops.h>
++#include <linux/etherdevice.h>
++#include <linux/if_ether.h>
++#include <linux/jiffies.h>
++#include <linux/moduleparam.h>
++#include <linux/string.h>
++
++#include "hard-interface.h"
++
++bool batadv_nss_offload_enable = true;
++module_param_named(nss_offload_enable, batadv_nss_offload_enable, bool, 0644);
++MODULE_PARM_DESC(nss_offload_enable,
++		 "Enable batman-adv NSS datapath offload attempts");
++
++static char *batadv_nss_offload_ifname = "";
++module_param_named(nss_offload_ifname, batadv_nss_offload_ifname, charp, 0644);
++MODULE_PARM_DESC(nss_offload_ifname,
++		 "Restrict NSS offload attempts to comma-separated hardif names");
++
++bool batadv_nss_offload_lazy_init = true;
++
++static unsigned int batadv_nss_offload_retry_ms = 3000;
++
++unsigned int batadv_nss_offload_submit_retry_ms = 3000;
++
++static unsigned int batadv_nss_offload_policy_cache_ms =
++	BATADV_NSS_OFFLOAD_POLICY_CACHE_MS_DEFAULT;
++
++static bool batadv_nss_offload_allow_eth = true;
++module_param_named(nss_offload_allow_eth, batadv_nss_offload_allow_eth, bool, 0644);
++MODULE_PARM_DESC(nss_offload_allow_eth,
++		 "Allow batman-adv NSS offload attempts on ethernet hardifs");
++
++bool batadv_nss_offload_allow_mcast = true;
++
++bool batadv_nss_offload_nonlinear_copy = true;
++
++#if IS_ENABLED(CONFIG_BATMAN_ADV_NSS_PERF_PROFILE)
++bool batadv_nss_offload_direct_submit = true;
++
++bool batadv_nss_offload_direct_submit_unlock = true;
++#endif
++
++static bool batadv_nss_offload_allow_wifi = true;
++module_param_named(nss_offload_allow_wifi, batadv_nss_offload_allow_wifi, bool, 0644);
++MODULE_PARM_DESC(nss_offload_allow_wifi,
++		 "Allow batman-adv NSS offload attempts on wifi hardifs");
++
++bool batadv_nss_offload_wifi_submit = true;
++
++bool batadv_nss_offload_wifi_create = true;
++
++
++static uint batadv_nss_offload_wifi_policy_u4_control_mask =
++	BIT(BATADV_P_DAT_DHT_GET) |
++	BIT(BATADV_P_DAT_DHT_PUT) |
++	BIT(BATADV_P_DAT_CACHE_REPLY);
++
++static char *batadv_nss_offload_wifi_ifname = "";
++module_param_named(nss_offload_wifi_ifname, batadv_nss_offload_wifi_ifname,
++		   charp, 0644);
++MODULE_PARM_DESC(nss_offload_wifi_ifname,
++		 "Restrict wifi NSS offload to comma-separated hardif names");
++
++static bool batadv_nss_ifname_match(const char *ifname_list, const char *ifname)
++{
++	const char *token, *end, *trimmed_end;
++	size_t token_len, ifname_len;
++
++	if (!ifname_list[0])
++		return true;
++
++	ifname_len = strlen(ifname);
++	token = ifname_list;
++
++	while (*token) {
++		while (*token == ',' || *token == ' ' || *token == '\t')
++			token++;
++		if (!*token)
++			break;
++
++		end = token;
++		while (*end && *end != ',')
++			end++;
++
++		trimmed_end = end;
++		while (trimmed_end > token &&
++		       (*(trimmed_end - 1) == ' ' ||
++			*(trimmed_end - 1) == '\t'))
++			trimmed_end--;
++
++		token_len = trimmed_end - token;
++		if (token_len == 1 && token[0] == '*')
++			return true;
++		if (token_len == 3 && !strncmp(token, "any", 3))
++			return true;
++		if (token_len == ifname_len && !strncmp(token, ifname, token_len))
++			return true;
++		if (token_len > 1 && token[token_len - 1] == '*' &&
++		    ifname_len >= token_len - 1 &&
++		    !strncmp(token, ifname, token_len - 1))
++			return true;
++
++		token = end;
++	}
++
++	return false;
++}
++
++bool batadv_nss_ifname_allowed(struct batadv_hard_iface *hard_iface)
++{
++	if (!batadv_nss_offload_ifname[0])
++		return true;
++
++	return batadv_nss_ifname_match(batadv_nss_offload_ifname,
++				       hard_iface->net_dev->name);
++}
++
++bool batadv_nss_hardif_supported(struct batadv_hard_iface *hard_iface)
++{
++	if (!batadv_is_wifi_hardif(hard_iface))
++		return batadv_nss_offload_allow_eth;
++
++	if (!batadv_nss_offload_allow_wifi)
++		return false;
++
++	if (!batadv_nss_offload_wifi_ifname[0])
++		return true;
++
++	return batadv_nss_ifname_match(batadv_nss_offload_wifi_ifname,
++				       hard_iface->net_dev->name);
++}
++
++bool batadv_nss_wifi_submit_allowed(struct batadv_hard_iface *hard_iface)
++{
++	if (!batadv_is_wifi_hardif(hard_iface))
++		return true;
++
++	return batadv_nss_offload_allow_wifi &&
++	       batadv_nss_offload_wifi_submit;
++}
++
++void batadv_nss_policy_cache_refresh(struct batadv_hard_iface *hard_iface)
++{
++	unsigned int cache_ms = batadv_nss_offload_policy_cache_ms;
++	const bool is_wifi = batadv_is_wifi_hardif(hard_iface);
++	unsigned long ttl;
++
++	hard_iface->nss_policy_ifname_allowed = batadv_nss_ifname_allowed(hard_iface);
++	if (is_wifi) {
++		hard_iface->nss_policy_hardif_supported =
++			batadv_nss_offload_allow_wifi &&
++			(!batadv_nss_offload_wifi_ifname[0] ||
++			 batadv_nss_ifname_match(batadv_nss_offload_wifi_ifname,
++						 hard_iface->net_dev->name));
++		hard_iface->nss_policy_wifi_submit_allowed =
++			batadv_nss_offload_allow_wifi &&
++			batadv_nss_offload_wifi_submit;
++	} else {
++		hard_iface->nss_policy_hardif_supported =
++			batadv_nss_offload_allow_eth;
++		hard_iface->nss_policy_wifi_submit_allowed = true;
++	}
++
++	if (!cache_ms)
++		cache_ms = BATADV_NSS_OFFLOAD_POLICY_CACHE_MS_DEFAULT;
++
++	ttl = msecs_to_jiffies(cache_ms);
++	WRITE_ONCE(hard_iface->nss_policy_cache_expires, jiffies + ttl);
++}
++
++bool batadv_nss_lazy_retry_allowed(struct batadv_hard_iface *hard_iface)
++{
++	unsigned long retry_j;
++
++	if (!READ_ONCE(hard_iface->nssctx_create_failed))
++		return true;
++
++	if (!batadv_nss_offload_retry_ms) {
++		WRITE_ONCE(hard_iface->nssctx_create_failed, false);
++		return true;
++	}
++
++	retry_j = msecs_to_jiffies(batadv_nss_offload_retry_ms);
++	if (time_is_before_jiffies(hard_iface->nssctx_last_create_jiffies + retry_j)) {
++		WRITE_ONCE(hard_iface->nssctx_create_failed, false);
++		return true;
++	}
++
++	return false;
++}
++
++static bool batadv_nss_wifi_control_nonuc_packettype(u8 packet_type)
++{
++	switch (packet_type) {
++	case BATADV_IV_OGM:
++	case BATADV_OGM2:
++	case BATADV_ELP:
++	case BATADV_CODED:
++		return true;
++	default:
++		return false;
++	}
++}
++
++static bool batadv_nss_wifi_u4_control_class(u8 subtype)
++{
++	switch (subtype) {
++	case BATADV_P_DAT_DHT_GET:
++	case BATADV_P_DAT_DHT_PUT:
++	case BATADV_P_DAT_CACHE_REPLY:
++		return true;
++	default:
++		return false;
++	}
++}
++
++static bool batadv_nss_wifi_u4_control_subtype(u8 subtype)
++{
++	if (subtype >= sizeof(batadv_nss_offload_wifi_policy_u4_control_mask) * 8)
++		return false;
++
++	return !!(batadv_nss_offload_wifi_policy_u4_control_mask & BIT(subtype));
++}
++
++void batadv_nss_wifi_classify(struct sk_buff *skb,
++			      struct batadv_nss_wifi_policy_result *result)
++{
++	const struct batadv_unicast_packet *unicast_packet;
++	const struct batadv_unicast_4addr_packet *u4_packet;
++	bool u4_control;
++
++	result->allowed = false;
++	result->reason = BATADV_NSS_WIFI_POLICY_NONUNICAST;
++	result->packet_type = 0;
++	result->subtype = 0;
++	result->control_nonuc = false;
++
++	if (unlikely(skb->len < ETH_HLEN + sizeof(*unicast_packet))) {
++		result->reason = BATADV_NSS_WIFI_POLICY_TRUNC;
++		return;
++	}
++
++	unicast_packet = (const struct batadv_unicast_packet *)(skb->data + ETH_HLEN);
++	result->packet_type = unicast_packet->packet_type;
++
++	switch (unicast_packet->packet_type) {
++	case BATADV_UNICAST:
++	case BATADV_UNICAST_FRAG:
++	case BATADV_ICMP:
++	case BATADV_UNICAST_TVLV:
++		result->allowed = true;
++		result->reason = BATADV_NSS_WIFI_POLICY_OK;
++		return;
++	case BATADV_UNICAST_4ADDR:
++		if (unlikely(skb->len < ETH_HLEN + sizeof(*u4_packet))) {
++			result->reason = BATADV_NSS_WIFI_POLICY_TRUNC;
++			return;
++		}
++
++		u4_packet = (const struct batadv_unicast_4addr_packet *)unicast_packet;
++		result->subtype = u4_packet->subtype;
++		u4_control = batadv_nss_wifi_u4_control_class(u4_packet->subtype);
++
++		if (u4_packet->subtype == BATADV_P_DATA) {
++			result->allowed = true;
++			result->reason = BATADV_NSS_WIFI_POLICY_OK;
++			return;
++		}
++
++		if (u4_control &&
++		    batadv_nss_wifi_u4_control_subtype(u4_packet->subtype)) {
++			result->allowed = true;
++			result->reason = BATADV_NSS_WIFI_POLICY_OK;
++			return;
++		}
++
++		result->reason = u4_control ?
++				 BATADV_NSS_WIFI_POLICY_U4_CONTROL :
++				 BATADV_NSS_WIFI_POLICY_U4_NONDATA;
++		return;
++	default:
++		result->control_nonuc =
++			batadv_nss_wifi_control_nonuc_packettype(unicast_packet->packet_type);
++		result->allowed = false;
++		result->reason = BATADV_NSS_WIFI_POLICY_NONUNICAST;
++		return;
++	}
++}
++
++void batadv_nss_wifi_policy_count(struct batadv_priv *bat_priv,
++				  enum batadv_nss_wifi_policy_reason reason,
++				  const struct batadv_nss_wifi_policy_result *result)
++{
++	if (!bat_priv)
++		return;
++
++	switch (reason) {
++	case BATADV_NSS_WIFI_POLICY_TRUNC:
++		batadv_inc_counter(bat_priv,
++				   BATADV_CNT_NSS_TX_BYPASS_WIFI_POLICY_TRUNC);
++		break;
++	case BATADV_NSS_WIFI_POLICY_U4_CONTROL:
++		batadv_inc_counter(bat_priv,
++				   BATADV_CNT_NSS_TX_BYPASS_WIFI_POLICY_U4_CONTROL);
++		break;
++	case BATADV_NSS_WIFI_POLICY_U4_NONDATA:
++		batadv_inc_counter(bat_priv,
++				   BATADV_CNT_NSS_TX_BYPASS_WIFI_POLICY_U4_NONDATA);
++		break;
++	case BATADV_NSS_WIFI_POLICY_NONUNICAST:
++		if (result && result->control_nonuc) {
++			batadv_inc_counter(bat_priv,
++					   BATADV_CNT_NSS_TX_BYPASS_WIFI_POLICY_CONTROL_NONUC);
++			switch (result->packet_type) {
++			case BATADV_IV_OGM:
++				batadv_inc_counter(bat_priv,
++						   BATADV_CNT_NSS_TX_BYPASS_WIFI_POLICY_CONTROL_NONUC_IV_OGM);
++				break;
++			case BATADV_OGM2:
++				batadv_inc_counter(bat_priv,
++						   BATADV_CNT_NSS_TX_BYPASS_WIFI_POLICY_CONTROL_NONUC_OGM2);
++				break;
++			case BATADV_ELP:
++				batadv_inc_counter(bat_priv,
++						   BATADV_CNT_NSS_TX_BYPASS_WIFI_POLICY_CONTROL_NONUC_ELP);
++				break;
++			case BATADV_CODED:
++				batadv_inc_counter(bat_priv,
++						   BATADV_CNT_NSS_TX_BYPASS_WIFI_POLICY_CONTROL_NONUC_CODED);
++				break;
++			}
++		} else {
++			batadv_inc_counter(bat_priv,
++					   BATADV_CNT_NSS_TX_BYPASS_WIFI_POLICY_NONUNICAST);
++		}
++		break;
++	case BATADV_NSS_WIFI_POLICY_OK:
++		break;
++	}
++}
+--- /dev/null	2026-02-26 01:46:56.076000000 -0600
++++ b/net/batman-adv/nss_rx.c	2026-03-05 18:37:58.449678145 -0600
+@@ -0,0 +1,82 @@
++// SPDX-License-Identifier: GPL-2.0
++/* Copyright (C) B.A.T.M.A.N. contributors */
++
++#include "nss_internal.h"
++
++#include <linux/etherdevice.h>
++#include <linux/if_ether.h>
++
++#include "hard-interface.h"
++
++void batadv_nss_receive_from_nss(struct net_device *dev,
++				 struct sk_buff *skb,
++				 struct napi_struct *napi)
++{
++	struct batadv_hard_iface *hard_iface = NULL;
++	struct batadv_priv *bat_priv = NULL;
++	bool nss_user_ref = false;
++
++	if (!skb)
++		return;
++
++	if (unlikely(!dev))
++		goto drop;
++
++	hard_iface = batadv_hardif_get_by_netdev(dev);
++	if (!hard_iface)
++		goto drop;
++
++	if (unlikely(READ_ONCE(hard_iface->nssctx_teardown)))
++		goto drop;
++
++	atomic_inc(&hard_iface->nssctx_users);
++	nss_user_ref = true;
++	smp_mb__after_atomic();
++	if (unlikely(READ_ONCE(hard_iface->nssctx_teardown) ||
++		     !READ_ONCE(hard_iface->nssctx)))
++		goto drop;
++
++	if (unlikely(!hard_iface->mesh_iface))
++		goto drop;
++
++	bat_priv = netdev_priv(hard_iface->mesh_iface);
++	batadv_inc_counter(bat_priv, BATADV_CNT_NSS_RX_EXCEPTION);
++
++	if (unlikely(skb->mark & 0x80000000u)) {
++		batadv_inc_counter(bat_priv,
++				   BATADV_CNT_NSS_RX_EXCEPTION_DROP_MARK_ECHO);
++		goto drop;
++	}
++
++	if (likely(skb->len >= ETH_HLEN)) {
++		const struct ethhdr *eth = (const struct ethhdr *)skb->data;
++
++		if (unlikely(ether_addr_equal(eth->h_source, dev->dev_addr))) {
++			batadv_inc_counter(bat_priv,
++					   BATADV_CNT_NSS_RX_EXCEPTION_DROP_SRC_ECHO);
++			goto drop;
++		}
++	}
++
++	batadv_inc_counter(bat_priv, BATADV_CNT_NSS_RX_EXCEPTION_REINJECT);
++
++	skb->dev = dev;
++	skb->protocol = eth_type_trans(skb, dev);
++	if (napi)
++		napi_gro_receive(napi, skb);
++	else
++		netif_rx(skb);
++
++	if (nss_user_ref)
++		atomic_dec(&hard_iface->nssctx_users);
++	batadv_hardif_put(hard_iface);
++	return;
++
++drop:
++	if (bat_priv)
++		batadv_inc_counter(bat_priv, BATADV_CNT_NSS_RX_EXCEPTION_DROP);
++	kfree_skb(skb);
++	if (nss_user_ref)
++		atomic_dec(&hard_iface->nssctx_users);
++	batadv_hardif_put(hard_iface);
++}
+--- /dev/null	2026-02-26 01:46:56.076000000 -0600
++++ b/net/batman-adv/nss_tx.c	2026-03-05 18:37:58.449678145 -0600
+@@ -0,0 +1,281 @@
++// SPDX-License-Identifier: GPL-2.0
++/* Copyright (C) B.A.T.M.A.N. contributors */
++
++#include "nss.h"
++#include "nss_internal.h"
++
++#include <linux/if_ether.h>
++#include <linux/jiffies.h>
++
++#include <nss_api_if.h>
++
++#include "hard-interface.h"
++
++static void batadv_nss_wifi_control_nonuc_seen(struct batadv_priv *bat_priv, u8 packet_type)
++{
++	if (!bat_priv)
++		return;
++
++	batadv_inc_counter(bat_priv, BATADV_CNT_NSS_TX_WIFI_SEEN_CONTROL_NONUC);
++
++	switch (packet_type) {
++	case BATADV_IV_OGM:
++		batadv_inc_counter(bat_priv,
++				   BATADV_CNT_NSS_TX_WIFI_SEEN_CONTROL_NONUC_IV_OGM);
++		break;
++	case BATADV_OGM2:
++		batadv_inc_counter(bat_priv,
++				   BATADV_CNT_NSS_TX_WIFI_SEEN_CONTROL_NONUC_OGM2);
++		break;
++	case BATADV_ELP:
++		batadv_inc_counter(bat_priv,
++				   BATADV_CNT_NSS_TX_WIFI_SEEN_CONTROL_NONUC_ELP);
++		break;
++	case BATADV_CODED:
++		batadv_inc_counter(bat_priv,
++				   BATADV_CNT_NSS_TX_WIFI_SEEN_CONTROL_NONUC_CODED);
++		break;
++	}
++}
++
++static inline struct nss_virt_if_handle *
++batadv_nss_ctx_get(struct batadv_hard_iface *hard_iface)
++{
++	struct nss_virt_if_handle *nssctx;
++
++	if (unlikely(READ_ONCE(hard_iface->nssctx_teardown)))
++		return NULL;
++
++	atomic_inc(&hard_iface->nssctx_users);
++	smp_mb__after_atomic();
++	nssctx = READ_ONCE(hard_iface->nssctx);
++	if (unlikely(!nssctx || READ_ONCE(hard_iface->nssctx_teardown))) {
++		atomic_dec(&hard_iface->nssctx_users);
++		return NULL;
++	}
++
++	return nssctx;
++}
++
++static inline void batadv_nss_ctx_put(struct batadv_hard_iface *hard_iface)
++{
++	atomic_dec(&hard_iface->nssctx_users);
++}
++
++bool batadv_nss_xmit(struct sk_buff *skb,
++		     struct batadv_hard_iface *hard_iface,
++		     const u8 *dst_addr, int *ret)
++{
++	struct batadv_priv *bat_priv = NULL;
++	struct batadv_nss_wifi_policy_result wifi_result;
++	struct nss_virt_if_handle *nssctx;
++	unsigned long now, retry_j;
++	bool nonlinear_copy;
++	struct sk_buff *nss_skb;
++	const bool is_wifi = batadv_is_wifi_hardif(hard_iface);
++	const bool direct_submit = batadv_nss_direct_submit_active();
++	nss_tx_status_t status;
++
++	if (likely(hard_iface->mesh_iface))
++		bat_priv = netdev_priv(hard_iface->mesh_iface);
++
++	if (unlikely(!batadv_nss_offload_enable)) {
++		if (bat_priv)
++			batadv_inc_counter(bat_priv, BATADV_CNT_NSS_TX_BYPASS_DISABLED);
++		return false;
++	}
++
++	now = jiffies;
++	if (unlikely(!batadv_nss_policy_cache_valid(hard_iface, now)))
++		batadv_nss_policy_cache_refresh(hard_iface);
++
++	if (unlikely(!hard_iface->nss_policy_ifname_allowed)) {
++		if (bat_priv)
++			batadv_inc_counter(bat_priv, BATADV_CNT_NSS_TX_BYPASS_IFNAME);
++		return false;
++	}
++
++	if (unlikely(!hard_iface->nss_policy_hardif_supported)) {
++		if (bat_priv) {
++			if (is_wifi) {
++				batadv_inc_counter(bat_priv, BATADV_CNT_NSS_TX_BYPASS_WIFI);
++				batadv_inc_counter(bat_priv,
++						   BATADV_CNT_NSS_TX_BYPASS_WIFI_POLICY);
++			} else {
++				batadv_inc_counter(bat_priv,
++						   BATADV_CNT_NSS_TX_BYPASS_IFNAME);
++			}
++		}
++		return false;
++	}
++
++	nssctx = READ_ONCE(hard_iface->nssctx);
++	if (unlikely(!nssctx)) {
++		if (batadv_nss_offload_lazy_init &&
++		    batadv_nss_lazy_retry_allowed(hard_iface))
++			batadv_nss_if_init(hard_iface);
++
++		nssctx = READ_ONCE(hard_iface->nssctx);
++		if (unlikely(!nssctx)) {
++			if (bat_priv) {
++				batadv_inc_counter(bat_priv, BATADV_CNT_NSS_TX_BYPASS_NOCTX);
++				if (READ_ONCE(hard_iface->nssctx_create_failed))
++					batadv_inc_counter(bat_priv,
++							   BATADV_CNT_NSS_TX_BYPASS_NOCTX_CREATE_FAIL);
++				else
++					batadv_inc_counter(bat_priv,
++							   BATADV_CNT_NSS_TX_BYPASS_NOCTX_INIT);
++			}
++			return false;
++		}
++	}
++
++	if (unlikely(READ_ONCE(hard_iface->nssctx_submit_failed))) {
++		if (!batadv_nss_offload_submit_retry_ms) {
++			WRITE_ONCE(hard_iface->nssctx_submit_failed, false);
++		} else {
++			retry_j = msecs_to_jiffies(batadv_nss_offload_submit_retry_ms);
++			if (!time_is_before_jiffies(hard_iface->nssctx_last_submit_fail_jiffies + retry_j)) {
++				if (bat_priv)
++					batadv_inc_counter(bat_priv,
++							   BATADV_CNT_NSS_TX_BYPASS_SUBMIT_COOLDOWN);
++				return false;
++			}
++			WRITE_ONCE(hard_iface->nssctx_submit_failed, false);
++		}
++	}
++
++	if (unlikely(is_wifi &&
++	    !READ_ONCE(hard_iface->nss_policy_wifi_submit_allowed))) {
++		if (bat_priv) {
++			batadv_inc_counter(bat_priv, BATADV_CNT_NSS_TX_BYPASS_WIFI);
++			batadv_inc_counter(bat_priv,
++					   BATADV_CNT_NSS_TX_BYPASS_WIFI_SUBMIT);
++		}
++		return false;
++	}
++
++	if (unlikely(!is_unicast_ether_addr(dst_addr) &&
++		     !batadv_nss_offload_allow_mcast)) {
++		if (bat_priv)
++			batadv_inc_counter(bat_priv, BATADV_CNT_NSS_TX_BYPASS_MCAST);
++		return false;
++	}
++
++	if (is_wifi) {
++		batadv_nss_wifi_classify(skb, &wifi_result);
++		if (!wifi_result.allowed) {
++			if (bat_priv) {
++				batadv_inc_counter(bat_priv, BATADV_CNT_NSS_TX_BYPASS_WIFI);
++				batadv_inc_counter(bat_priv,
++						   BATADV_CNT_NSS_TX_BYPASS_WIFI_POLICY);
++				if (wifi_result.control_nonuc)
++					batadv_nss_wifi_control_nonuc_seen(bat_priv,
++									   wifi_result.packet_type);
++				batadv_nss_wifi_policy_count(bat_priv, wifi_result.reason,
++							     &wifi_result);
++			}
++			return false;
++		}
++	}
++
++	nonlinear_copy = skb_is_nonlinear(skb);
++	if (unlikely(nonlinear_copy && !batadv_nss_offload_nonlinear_copy)) {
++		if (bat_priv)
++			batadv_inc_counter(bat_priv, BATADV_CNT_NSS_TX_BYPASS_NONLINEAR);
++		return false;
++	}
++
++	if (unlikely(nonlinear_copy && bat_priv))
++		batadv_inc_counter(bat_priv, BATADV_CNT_NSS_TX_NONLINEAR_COPY);
++
++	if (bat_priv)
++		batadv_inc_counter(bat_priv, BATADV_CNT_NSS_TX_ATTEMPT);
++
++	if (likely(direct_submit)) {
++		nssctx = batadv_nss_ctx_get(hard_iface);
++		if (unlikely(!nssctx)) {
++			if (bat_priv)
++				batadv_inc_counter(bat_priv,
++						   BATADV_CNT_NSS_TX_BYPASS_SUBMIT_COOLDOWN);
++			return false;
++		}
++
++		skb->mark |= 0x80000000u;
++		status = nss_virt_if_tx_buf(nssctx, skb);
++		batadv_nss_ctx_put(hard_iface);
++		if (unlikely(status != NSS_TX_SUCCESS)) {
++			WRITE_ONCE(hard_iface->nssctx_submit_failed, true);
++			hard_iface->nssctx_last_submit_fail_jiffies = jiffies;
++			/* Direct-submit path marks skb to avoid immediate reprocessing loops. */
++			skb->mark &= ~0x80000000u;
++			if (bat_priv) {
++				batadv_inc_counter(bat_priv, BATADV_CNT_NSS_TX_SUBMIT_FAIL);
++				batadv_inc_counter(bat_priv, BATADV_CNT_NSS_TX_FALLBACK);
++			}
++			return false;
++		}
++
++		WRITE_ONCE(hard_iface->nssctx_submit_failed, false);
++		if (bat_priv)
++			batadv_inc_counter(bat_priv, BATADV_CNT_NSS_TX_SUCCESS);
++		*ret = NET_XMIT_SUCCESS;
++		return true;
++	}
++
++	nss_skb = nonlinear_copy ? skb_copy(skb, GFP_ATOMIC) :
++		  skb_clone(skb, GFP_ATOMIC);
++	if (!nss_skb) {
++		if (bat_priv) {
++			if (nonlinear_copy)
++				batadv_inc_counter(bat_priv,
++						   BATADV_CNT_NSS_TX_NONLINEAR_COPY_FAIL);
++			batadv_inc_counter(bat_priv, BATADV_CNT_NSS_TX_CLONE_FAIL);
++			batadv_inc_counter(bat_priv, BATADV_CNT_NSS_TX_FALLBACK);
++		}
++		return false;
++	}
++
++	if (nonlinear_copy && skb_is_nonlinear(nss_skb) &&
++	    skb_linearize(nss_skb)) {
++		kfree_skb(nss_skb);
++		if (bat_priv) {
++			batadv_inc_counter(bat_priv, BATADV_CNT_NSS_TX_BYPASS_NONLINEAR);
++			batadv_inc_counter(bat_priv,
++					   BATADV_CNT_NSS_TX_NONLINEAR_LINEARIZE_FAIL);
++			batadv_inc_counter(bat_priv, BATADV_CNT_NSS_TX_CLONE_FAIL);
++			batadv_inc_counter(bat_priv, BATADV_CNT_NSS_TX_FALLBACK);
++		}
++		return false;
++	}
++
++	nss_skb->mark |= 0x80000000u;
++	nssctx = batadv_nss_ctx_get(hard_iface);
++	if (unlikely(!nssctx)) {
++		kfree_skb(nss_skb);
++		if (bat_priv)
++			batadv_inc_counter(bat_priv,
++					   BATADV_CNT_NSS_TX_BYPASS_SUBMIT_COOLDOWN);
++		return false;
++	}
++
++	status = nss_virt_if_tx_buf(nssctx, nss_skb);
++	batadv_nss_ctx_put(hard_iface);
++	if (unlikely(status != NSS_TX_SUCCESS)) {
++		kfree_skb(nss_skb);
++		WRITE_ONCE(hard_iface->nssctx_submit_failed, true);
++		hard_iface->nssctx_last_submit_fail_jiffies = jiffies;
++		if (bat_priv) {
++			batadv_inc_counter(bat_priv, BATADV_CNT_NSS_TX_SUBMIT_FAIL);
++			batadv_inc_counter(bat_priv, BATADV_CNT_NSS_TX_FALLBACK);
++		}
++		return false;
++	}
++
++	WRITE_ONCE(hard_iface->nssctx_submit_failed, false);
++	if (bat_priv)
++		batadv_inc_counter(bat_priv, BATADV_CNT_NSS_TX_SUCCESS);
++	consume_skb(skb);
++	*ret = NET_XMIT_SUCCESS;
++	return true;
++}
+--- a/net/batman-adv/send.c	2026-02-24 09:23:32.000000000 -0600
++++ b/net/batman-adv/send.c	2026-03-05 18:37:58.449678145 -0600
+@@ -34,6 +34,7 @@
+ #include "hard-interface.h"
+ #include "log.h"
+ #include "mesh-interface.h"
++#include "nss.h"
+ #include "originator.h"
+ #include "routing.h"
+ #include "translation-table.h"
+@@ -93,6 +94,10 @@
+ 
+ 	skb->dev = hard_iface->net_dev;
+ 
++	/* Let NSS consume the frame when an offload backend is enabled. */
++	if (batadv_nss_xmit(skb, hard_iface, dst_addr, &ret))
++		return ret;
++
+ 	/* dev_queue_xmit() returns a negative result on error.	 However on
+ 	 * congestion and traffic shaping, it drops and returns NET_XMIT_DROP
+ 	 * (which is > 0). This will not be treated as an error.
+--- a/net/batman-adv/types.h	2026-02-24 09:23:32.000000000 -0600
++++ b/net/batman-adv/types.h	2026-03-05 18:37:58.449678145 -0600
+@@ -30,6 +30,10 @@
+ #include <uapi/linux/batadv_packet.h>
+ #include <uapi/linux/batman_adv.h>
+ 
++#ifdef CONFIG_BATMAN_ADV_NSS
++struct nss_virt_if_handle;
++#endif
++
+ #ifdef CONFIG_BATMAN_ADV_DAT
+ 
+ /**
+@@ -224,6 +228,49 @@
+ 	struct batadv_hard_iface_bat_v bat_v;
+ #endif
+ 
++#ifdef CONFIG_BATMAN_ADV_NSS
++	/** @nssctx: NSS virtual interface context for this hard-interface */
++	struct nss_virt_if_handle *nssctx;
++
++	/** @nssctx_teardown: true while NSS context teardown is in progress */
++	bool nssctx_teardown;
++
++	/** @nssctx_users: in-flight NSS TX users of @nssctx */
++	atomic_t nssctx_users;
++
++	/** @nssctx_dev_held: true if NSS create path took a netdev reference */
++	bool nssctx_dev_held;
++
++	/** @nssctx_init_in_progress: serialized NSS context creation */
++	atomic_t nssctx_init_in_progress;
++
++	/** @nssctx_create_failed: last NSS virtual interface create attempt failed */
++	bool nssctx_create_failed;
++
++	/** @nssctx_last_create_jiffies: jiffies timestamp of last create attempt */
++	unsigned long nssctx_last_create_jiffies;
++
++	/** @nssctx_submit_failed: last NSS submit attempt failed on this hardif */
++	bool nssctx_submit_failed;
++
++	/** @nssctx_last_submit_fail_jiffies: jiffies timestamp of last submit fail */
++	unsigned long nssctx_last_submit_fail_jiffies;
++
++	/** @nss_policy_cache_expires: jiffies deadline for policy cache refresh */
++	unsigned long nss_policy_cache_expires;
++
++	/** @nss_policy_ifname_allowed: cached result of ifname policy */
++	bool nss_policy_ifname_allowed;
++
++	/** @nss_policy_hardif_supported: cached hardif eligibility */
++	bool nss_policy_hardif_supported;
++
++	/** @nss_policy_wifi_submit_allowed: cached wifi submit gate state */
++	bool nss_policy_wifi_submit_allowed;
++
++
++#endif
++
+ 	/**
+ 	 * @neigh_list: list of unique single hop neighbors via this interface
+ 	 */
+@@ -936,6 +990,123 @@
+ 	BATADV_CNT_DAT_CACHED_REPLY_TX,
+ #endif
+ 
++#ifdef CONFIG_BATMAN_ADV_NSS
++	/** @BATADV_CNT_NSS_TX_ATTEMPT: NSS offload transmit attempt counter */
++	BATADV_CNT_NSS_TX_ATTEMPT,
++
++	/** @BATADV_CNT_NSS_TX_SUCCESS: NSS offload transmit success counter */
++	BATADV_CNT_NSS_TX_SUCCESS,
++
++	/** @BATADV_CNT_NSS_TX_FALLBACK: NSS transmit fallback counter */
++	BATADV_CNT_NSS_TX_FALLBACK,
++
++	/** @BATADV_CNT_NSS_TX_BYPASS_NOCTX: bypassed because no NSS context */
++	BATADV_CNT_NSS_TX_BYPASS_NOCTX,
++
++	/** @BATADV_CNT_NSS_TX_BYPASS_NOCTX_INIT: context not initialized yet */
++	BATADV_CNT_NSS_TX_BYPASS_NOCTX_INIT,
++
++	/** @BATADV_CNT_NSS_TX_BYPASS_NOCTX_CREATE_FAIL: context create failed */
++	BATADV_CNT_NSS_TX_BYPASS_NOCTX_CREATE_FAIL,
++
++	/** @BATADV_CNT_NSS_TX_BYPASS_DISABLED: bypassed because offload disabled */
++	BATADV_CNT_NSS_TX_BYPASS_DISABLED,
++
++	/** @BATADV_CNT_NSS_TX_BYPASS_IFNAME: bypassed by hardif name gate */
++	BATADV_CNT_NSS_TX_BYPASS_IFNAME,
++
++	/** @BATADV_CNT_NSS_TX_BYPASS_WIFI: bypassed for wifi hard-interface */
++	BATADV_CNT_NSS_TX_BYPASS_WIFI,
++
++	/** @BATADV_CNT_NSS_TX_BYPASS_WIFI_POLICY: bypassed by wifi policy gate */
++	BATADV_CNT_NSS_TX_BYPASS_WIFI_POLICY,
++
++	/** @BATADV_CNT_NSS_TX_BYPASS_WIFI_POLICY_TRUNC: wifi policy short frame */
++	BATADV_CNT_NSS_TX_BYPASS_WIFI_POLICY_TRUNC,
++
++	/** @BATADV_CNT_NSS_TX_BYPASS_WIFI_POLICY_NONUNICAST: non-unicast ptype */
++	BATADV_CNT_NSS_TX_BYPASS_WIFI_POLICY_NONUNICAST,
++
++	/** @BATADV_CNT_NSS_TX_BYPASS_WIFI_POLICY_U4_NONDATA: 4addr non-data subtype */
++	BATADV_CNT_NSS_TX_BYPASS_WIFI_POLICY_U4_NONDATA,
++
++	/** @BATADV_CNT_NSS_TX_BYPASS_WIFI_POLICY_U4_CONTROL: 4addr DAT control subtype */
++	BATADV_CNT_NSS_TX_BYPASS_WIFI_POLICY_U4_CONTROL,
++
++	/** @BATADV_CNT_NSS_TX_BYPASS_WIFI_POLICY_CONTROL_NONUC: non-unicast control packet type */
++	BATADV_CNT_NSS_TX_BYPASS_WIFI_POLICY_CONTROL_NONUC,
++
++	/** @BATADV_CNT_NSS_TX_BYPASS_WIFI_POLICY_CONTROL_NONUC_IV_OGM: BATADV_IV_OGM */
++	BATADV_CNT_NSS_TX_BYPASS_WIFI_POLICY_CONTROL_NONUC_IV_OGM,
++
++	/** @BATADV_CNT_NSS_TX_BYPASS_WIFI_POLICY_CONTROL_NONUC_OGM2: BATADV_OGM2 */
++	BATADV_CNT_NSS_TX_BYPASS_WIFI_POLICY_CONTROL_NONUC_OGM2,
++
++	/** @BATADV_CNT_NSS_TX_BYPASS_WIFI_POLICY_CONTROL_NONUC_ELP: BATADV_ELP */
++	BATADV_CNT_NSS_TX_BYPASS_WIFI_POLICY_CONTROL_NONUC_ELP,
++
++	/** @BATADV_CNT_NSS_TX_BYPASS_WIFI_POLICY_CONTROL_NONUC_CODED: BATADV_CODED */
++	BATADV_CNT_NSS_TX_BYPASS_WIFI_POLICY_CONTROL_NONUC_CODED,
++
++	/** @BATADV_CNT_NSS_TX_WIFI_SEEN_CONTROL_NONUC: observed non-unicast control packet type */
++	BATADV_CNT_NSS_TX_WIFI_SEEN_CONTROL_NONUC,
++
++	/** @BATADV_CNT_NSS_TX_WIFI_SEEN_CONTROL_NONUC_IV_OGM: observed BATADV_IV_OGM */
++	BATADV_CNT_NSS_TX_WIFI_SEEN_CONTROL_NONUC_IV_OGM,
++
++	/** @BATADV_CNT_NSS_TX_WIFI_SEEN_CONTROL_NONUC_OGM2: observed BATADV_OGM2 */
++	BATADV_CNT_NSS_TX_WIFI_SEEN_CONTROL_NONUC_OGM2,
++
++	/** @BATADV_CNT_NSS_TX_WIFI_SEEN_CONTROL_NONUC_ELP: observed BATADV_ELP */
++	BATADV_CNT_NSS_TX_WIFI_SEEN_CONTROL_NONUC_ELP,
++
++	/** @BATADV_CNT_NSS_TX_WIFI_SEEN_CONTROL_NONUC_CODED: observed BATADV_CODED */
++	BATADV_CNT_NSS_TX_WIFI_SEEN_CONTROL_NONUC_CODED,
++
++	/** @BATADV_CNT_NSS_TX_BYPASS_WIFI_SUBMIT: bypassed by wifi submit gate */
++	BATADV_CNT_NSS_TX_BYPASS_WIFI_SUBMIT,
++
++	/** @BATADV_CNT_NSS_TX_BYPASS_MCAST: bypassed for multicast destination */
++	BATADV_CNT_NSS_TX_BYPASS_MCAST,
++
++	/** @BATADV_CNT_NSS_TX_BYPASS_NONLINEAR: bypassed for non-linear skb */
++	BATADV_CNT_NSS_TX_BYPASS_NONLINEAR,
++
++	/** @BATADV_CNT_NSS_TX_NONLINEAR_COPY: nonlinear skb copy path used */
++	BATADV_CNT_NSS_TX_NONLINEAR_COPY,
++
++	/** @BATADV_CNT_NSS_TX_NONLINEAR_COPY_FAIL: nonlinear skb copy alloc failed */
++	BATADV_CNT_NSS_TX_NONLINEAR_COPY_FAIL,
++
++	/** @BATADV_CNT_NSS_TX_NONLINEAR_LINEARIZE_FAIL: nonlinear copy linearize failed */
++	BATADV_CNT_NSS_TX_NONLINEAR_LINEARIZE_FAIL,
++
++	/** @BATADV_CNT_NSS_TX_CLONE_FAIL: skb clone failed before NSS submit */
++	BATADV_CNT_NSS_TX_CLONE_FAIL,
++
++	/** @BATADV_CNT_NSS_TX_SUBMIT_FAIL: NSS submission failed */
++	BATADV_CNT_NSS_TX_SUBMIT_FAIL,
++
++	/** @BATADV_CNT_NSS_TX_BYPASS_SUBMIT_COOLDOWN: bypassed by submit-fail cooldown */
++	BATADV_CNT_NSS_TX_BYPASS_SUBMIT_COOLDOWN,
++
++	/** @BATADV_CNT_NSS_RX_EXCEPTION: packets exceptioned from NSS into host stack */
++	BATADV_CNT_NSS_RX_EXCEPTION,
++
++	/** @BATADV_CNT_NSS_RX_EXCEPTION_DROP: exception packets dropped before reinject */
++	BATADV_CNT_NSS_RX_EXCEPTION_DROP,
++
++	/** @BATADV_CNT_NSS_RX_EXCEPTION_DROP_MARK_ECHO: dropped because skb mark denotes TX echo */
++	BATADV_CNT_NSS_RX_EXCEPTION_DROP_MARK_ECHO,
++
++	/** @BATADV_CNT_NSS_RX_EXCEPTION_DROP_SRC_ECHO: dropped because source MAC matches local hardif */
++	BATADV_CNT_NSS_RX_EXCEPTION_DROP_SRC_ECHO,
++
++	/** @BATADV_CNT_NSS_RX_EXCEPTION_REINJECT: exception packets re-injected into host stack */
++	BATADV_CNT_NSS_RX_EXCEPTION_REINJECT,
++
++#endif
++
+ 	/** @BATADV_CNT_NUM: number of traffic counters */
+ 	BATADV_CNT_NUM,
+ };

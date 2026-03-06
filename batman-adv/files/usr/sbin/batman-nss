@@ -1,0 +1,64 @@
+#!/bin/sh
+
+SERVICE="/etc/init.d/batman-adv-nss"
+
+usage() {
+	cat <<'EOF'
+Usage: batman-nss <command> [args]
+
+Commands:
+  status                 Show UCI + runtime NSS parameters
+  apply                  Apply /etc/config/batman-adv to runtime params
+  safe                   Force safe NSS-off runtime profile
+  profile <name>         Persist+apply: off|max
+  enable [profile]       Enable suite and apply profile (default: max)
+  disable                Disable suite and force safe profile
+  counters               Show bat0 NSS tx counters
+EOF
+}
+
+[ -x "$SERVICE" ] || {
+	echo "batman-nss: missing $SERVICE" >&2
+	exit 1
+}
+
+cmd="$1"
+shift 2>/dev/null || true
+
+case "$cmd" in
+status)
+	"$SERVICE" show
+	;;
+apply)
+	"$SERVICE" apply
+	;;
+safe)
+	"$SERVICE" safe
+	;;
+profile)
+	[ -n "$1" ] || { usage; exit 1; }
+	"$SERVICE" set_profile "$1"
+	;;
+enable)
+	profile="${1:-max}"
+	uci set batman-adv.default=nss
+	uci set batman-adv.default.enabled='1'
+	uci set batman-adv.default.profile="$profile"
+	uci commit batman-adv
+	"$SERVICE" apply
+	;;
+disable)
+	uci set batman-adv.default=nss
+	uci set batman-adv.default.enabled='0'
+	uci set batman-adv.default.profile='off'
+	uci commit batman-adv
+	"$SERVICE" safe
+	;;
+counters)
+	ethtool -S bat0 | grep nss_tx
+	;;
+*)
+	usage
+	[ -n "$cmd" ] && exit 1
+	;;
+esac

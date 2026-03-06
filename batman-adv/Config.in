@@ -73,3 +73,26 @@ config BATMAN_ADV_TRACING
 	  messages using the generic tracing infrastructure of the kernel.
 	  BATMAN_ADV_DEBUG must also be selected to get trace events for
 	  batadv_dbg.
+
+choice
+	prompt "B.A.T.M.A.N. datapath mode"
+	default BATMAN_ADV_MODE_NSS if TARGET_qualcommax
+	default BATMAN_ADV_MODE_NORMAL
+
+config BATMAN_ADV_MODE_NORMAL
+	bool "Normal software datapath"
+
+config BATMAN_ADV_MODE_NSS
+	bool "NSS datapath offload"
+	depends on TARGET_qualcommax
+
+endchoice
+
+config BATMAN_ADV_NSS
+	bool
+	default y if BATMAN_ADV_MODE_NSS
+	default n
+	help
+	  Enable scaffolding hooks for Qualcomm NSS acceleration in batman-adv.
+	  The initial implementation keeps the software datapath behavior
+	  unchanged and only adds integration hook points.

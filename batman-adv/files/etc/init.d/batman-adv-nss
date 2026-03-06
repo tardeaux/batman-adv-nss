@@ -1,0 +1,181 @@
+#!/bin/sh /etc/rc.common
+
+START=19
+USE_PROCD=1
+
+NSS_SYSFS_BASE="/sys/module/batman_adv/parameters"
+NSS_UCI_SECTION="default"
+
+bool_to_yn() {
+	case "$1" in
+		1|y|Y|yes|YES|true|TRUE|on|ON) printf Y ;;
+		*) printf N ;;
+	esac
+}
+
+param_file() {
+	printf "%s/%s" "$NSS_SYSFS_BASE" "$1"
+}
+
+param_exists() {
+	[ -f "$(param_file "$1")" ]
+}
+
+set_param() {
+	local name="$1"
+	local value="$2"
+	local file
+
+	file="$(param_file "$name")"
+	[ -f "$file" ] || return 0
+	printf "%s" "$value" > "$file"
+}
+
+set_bool_param() {
+	local name="$1"
+	local value="$2"
+	set_param "$name" "$(bool_to_yn "$value")"
+}
+
+set_profile_off() {
+	set_bool_param nss_offload_allow_mcast 0
+	set_bool_param nss_offload_nonlinear_copy 0
+	set_bool_param nss_offload_wifi_submit 0
+	set_bool_param nss_offload_wifi_create 0
+	set_bool_param nss_offload_allow_wifi 0
+	set_bool_param nss_offload_enable 0
+}
+
+set_profile_max() {
+	set_bool_param nss_offload_enable 1
+	set_bool_param nss_offload_allow_wifi 1
+	set_bool_param nss_offload_wifi_create 1
+	set_bool_param nss_offload_wifi_submit 1
+	set_bool_param nss_offload_lazy_init 1
+	set_bool_param nss_offload_nonlinear_copy 1
+	set_bool_param nss_offload_allow_mcast 1
+}
+
+apply_profile() {
+	local profile="$1"
+
+	case "$profile" in
+		off) set_profile_off ;;
+		max) set_profile_max ;;
+		*) logger -t batman-adv-nss "invalid profile '$profile', using off"; set_profile_off ;;
+	esac
+}
+
+apply_overrides() {
+	local ifname wifi_ifname allow_eth lazy_init
+	local enable allow_wifi wifi_create wifi_submit
+	local allow_mcast nonlinear_copy
+
+	config_get ifname "$NSS_UCI_SECTION" ifname ""
+	config_get wifi_ifname "$NSS_UCI_SECTION" wifi_ifname ""
+	config_get allow_eth "$NSS_UCI_SECTION" allow_eth ""
+	config_get lazy_init "$NSS_UCI_SECTION" lazy_init ""
+	config_get enable "$NSS_UCI_SECTION" enable ""
+	config_get allow_wifi "$NSS_UCI_SECTION" allow_wifi ""
+	config_get wifi_create "$NSS_UCI_SECTION" wifi_create ""
+	config_get wifi_submit "$NSS_UCI_SECTION" wifi_submit ""
+	config_get allow_mcast "$NSS_UCI_SECTION" allow_mcast ""
+	config_get nonlinear_copy "$NSS_UCI_SECTION" nonlinear_copy ""
+
+	[ -n "$ifname" ] && set_param nss_offload_ifname "$ifname"
+	[ -z "$wifi_ifname" ] && wifi_ifname="$ifname"
+	[ -n "$wifi_ifname" ] && set_param nss_offload_wifi_ifname "$wifi_ifname"
+	[ -n "$allow_eth" ] && set_bool_param nss_offload_allow_eth "$allow_eth"
+	[ -n "$lazy_init" ] && set_bool_param nss_offload_lazy_init "$lazy_init"
+	[ -n "$enable" ] && set_bool_param nss_offload_enable "$enable"
+	[ -n "$allow_wifi" ] && set_bool_param nss_offload_allow_wifi "$allow_wifi"
+	[ -n "$wifi_create" ] && set_bool_param nss_offload_wifi_create "$wifi_create"
+	[ -n "$wifi_submit" ] && set_bool_param nss_offload_wifi_submit "$wifi_submit"
+	[ -n "$allow_mcast" ] && set_bool_param nss_offload_allow_mcast "$allow_mcast"
+	[ -n "$nonlinear_copy" ] && set_bool_param nss_offload_nonlinear_copy "$nonlinear_copy"
+}
+
+status_params() {
+	local p
+	for p in \
+		nss_offload_enable \
+		nss_offload_allow_wifi \
+		nss_offload_wifi_create \
+		nss_offload_wifi_submit \
+		nss_offload_allow_mcast \
+		nss_offload_nonlinear_copy \
+		nss_offload_lazy_init \
+		nss_offload_allow_eth \
+		nss_offload_ifname
+	do
+		param_exists "$p" || continue
+		printf "%s=%s\n" "$p" "$(cat "$(param_file "$p")")"
+	done
+}
+
+apply_config() {
+	local auto_apply enabled profile
+
+	[ -d "$NSS_SYSFS_BASE" ] || return 0
+
+	config_load batman-adv
+	config_get auto_apply "$NSS_UCI_SECTION" auto_apply 1
+	config_get enabled "$NSS_UCI_SECTION" enabled 0
+	config_get profile "$NSS_UCI_SECTION" profile off
+
+	[ "$auto_apply" = "1" ] || return 0
+
+	if [ "$enabled" = "1" ]; then
+		apply_profile "$profile"
+	else
+		set_profile_off
+	fi
+
+	apply_overrides
+}
+
+start_service() {
+	apply_config
+}
+
+reload_service() {
+	apply_config
+}
+
+service_triggers() {
+	procd_add_reload_trigger batman-adv
+}
+
+apply() {
+	apply_config
+	status_params
+}
+
+safe() {
+	set_profile_off
+	status_params
+}
+
+set_profile() {
+	local profile="$1"
+	[ -n "$profile" ] || profile="off"
+
+	uci set batman-adv.default=nss
+	uci set batman-adv.default.enabled='1'
+	uci set batman-adv.default.profile="$profile"
+	uci commit batman-adv
+
+	apply
+}
+
+show() {
+	echo "UCI:"
+	uci -q show batman-adv | sed 's/^/  /'
+	echo "Runtime:"
+	status_params | sed 's/^/  /'
+}
+
+extra_command apply "Apply NSS settings from /etc/config/batman-adv"
+extra_command safe "Force safe NSS-off profile immediately"
+extra_command set_profile "Persist and apply profile: off|max"
+extra_command show "Show NSS UCI settings and runtime module parameters"

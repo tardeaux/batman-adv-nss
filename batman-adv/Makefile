@@ -4,7 +4,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=batman-adv
 PKG_VERSION:=2026.0
-PKG_RELEASE:=1
+PKG_RELEASE:=11
 
 PKG_SOURCE:=$(PKG_NAME)-$(PKG_VERSION).tar.gz
 PKG_SOURCE_URL:=https://downloads.open-mesh.org/batman/releases/batman-adv-$(PKG_VERSION)
@@ -25,7 +25,10 @@ PKG_CONFIG_DEPENDS += \
 	CONFIG_BATMAN_ADV_DAT \
 	CONFIG_BATMAN_ADV_MCAST \
 	CONFIG_BATMAN_ADV_DEBUG \
-	CONFIG_BATMAN_ADV_TRACING
+	CONFIG_BATMAN_ADV_TRACING \
+	CONFIG_BATMAN_ADV_MODE_NORMAL \
+	CONFIG_BATMAN_ADV_MODE_NSS \
+	CONFIG_BATMAN_ADV_NSS
 
 include $(INCLUDE_DIR)/kernel.mk
 include $(INCLUDE_DIR)/package.mk
@@ -34,7 +37,8 @@ define KernelPackage/batman-adv
   SUBMENU:=Network Support
   TITLE:=B.A.T.M.A.N. Adv
   URL:=https://www.open-mesh.org/
-  DEPENDS:=+BATMAN_ADV_BLA:kmod-lib-crc16 +kmod-lib-crc32c +kmod-cfg80211 +batctl
+  DEPENDS:=+BATMAN_ADV_BLA:kmod-lib-crc16 +kmod-lib-crc32c +kmod-cfg80211 +batctl \
+	+BATMAN_ADV_NSS:kmod-qca-nss-drv
   FILES:=$(PKG_BUILD_DIR)/net/batman-adv/batman-adv.$(LINUX_KMOD_SUFFIX)
   AUTOLOAD:=$(call AutoProbe,batman-adv)
 endef
@@ -64,6 +68,7 @@ PKG_EXTRA_KCONFIG:= \
 	CONFIG_BATMAN_ADV_MCAST=$(if $(CONFIG_BATMAN_ADV_MCAST),y,n) \
 	CONFIG_BATMAN_ADV_BATMAN_V=$(if $(CONFIG_BATMAN_ADV_BATMAN_V),y,n) \
 	CONFIG_BATMAN_ADV_TRACING=$(if $(CONFIG_BATMAN_ADV_TRACING),y,n) \
+	CONFIG_BATMAN_ADV_NSS=$(if $(CONFIG_BATMAN_ADV_NSS),y,n) \
 
 PKG_EXTRA_CFLAGS:= \
 	$(patsubst CONFIG_%, -DCONFIG_%=1, $(patsubst %=m,%,$(filter %=m,$(PKG_EXTRA_KCONFIG)))) \
@@ -76,6 +81,7 @@ NOSTDINC_FLAGS = \
 	-I$(STAGING_DIR)/usr/include/mac80211-backport/uapi \
 	-I$(STAGING_DIR)/usr/include/mac80211 \
 	-I$(STAGING_DIR)/usr/include/mac80211/uapi \
+	$(if $(CONFIG_BATMAN_ADV_NSS),-I$(STAGING_DIR)/usr/include/qca-nss-drv) \
 	-I$(PKG_BUILD_DIR)/include/ \
 	-include backport/autoconf.h \
 	-include backport/backport.h \

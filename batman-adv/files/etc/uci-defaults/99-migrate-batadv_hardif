@@ -6,6 +6,16 @@
 
 . /lib/functions.sh
 
+LEGACY_BATADV=0
+
+mark_legacy_batadv() {
+    local section="$1"
+    local type
+
+    config_get type "${section}" TYPE
+    [ "${type}" = "mesh" ] && LEGACY_BATADV=1
+}
+
 proto_batadv_to_batadv_hardif() {
     local section="$1"
     local proto
@@ -80,6 +90,11 @@ mv_batadv_config_section() {
 }
 
 if [ -f /etc/config/batman-adv ]; then
+    config_load batman-adv
+    config_foreach mark_legacy_batadv
+
+    [ "${LEGACY_BATADV}" -eq 1 ] || exit 0
+
     config_load network
     config_foreach proto_batadv_to_batadv_hardif 'interface'
     uci commit network
