@@ -1,6 +1,8 @@
---- a/net/batman-adv/Kconfig	2026-02-24 09:23:32.000000000 -0600
-+++ b/net/batman-adv/Kconfig	2026-03-05 18:37:58.449678145 -0600
-@@ -82,3 +82,21 @@
+diff --git a/net/batman-adv/Kconfig b/net/batman-adv/Kconfig
+index 58c408b7a7..dd00f85ab3 100644
+--- a/net/batman-adv/Kconfig
++++ b/net/batman-adv/Kconfig
+@@ -82,3 +82,21 @@ config BATMAN_ADV_TRACING
  	  messages using the generic tracing infrastructure of the kernel.
  	  BATMAN_ADV_DEBUG must also be selected to get trace events for
  	  batadv_dbg.
@@ -22,9 +24,11 @@
 +	help
 +	  Enables additional high-performance NSS datapath options with
 +	  reduced safety/readability tradeoffs. Enabled by default.
---- a/net/batman-adv/Makefile	2026-02-24 09:23:32.000000000 -0600
-+++ b/net/batman-adv/Makefile	2026-03-05 18:37:58.449678145 -0600
-@@ -26,6 +26,10 @@
+diff --git a/net/batman-adv/Makefile b/net/batman-adv/Makefile
+index d3c4d4143c..8fc8943ece 100644
+--- a/net/batman-adv/Makefile
++++ b/net/batman-adv/Makefile
+@@ -26,6 +26,10 @@ batman-adv-y += netlink.o
  batman-adv-y += originator.o
  batman-adv-y += routing.o
  batman-adv-y += send.o
@@ -35,8 +39,10 @@
  batman-adv-$(CONFIG_BATMAN_ADV_TRACING) += trace.o
  batman-adv-y += tp_meter.o
  batman-adv-y += translation-table.o
---- a/net/batman-adv/hard-interface.c	2026-03-05 18:36:58.334707247 -0600
-+++ b/net/batman-adv/hard-interface.c	2026-03-05 18:37:58.449678145 -0600
+diff --git a/net/batman-adv/hard-interface.c b/net/batman-adv/hard-interface.c
+index 1c488049d5..a137793246 100644
+--- a/net/batman-adv/hard-interface.c
++++ b/net/batman-adv/hard-interface.c
 @@ -38,6 +38,7 @@
  #include "gateway_client.h"
  #include "log.h"
@@ -45,7 +51,7 @@
  #include "originator.h"
  #include "send.h"
  #include "translation-table.h"
-@@ -742,6 +743,8 @@
+@@ -743,6 +744,8 @@ int batadv_hardif_enable_interface(struct batadv_hard_iface *hard_iface,
  	hard_iface->batman_adv_ptype.dev = hard_iface->net_dev;
  	dev_add_pack(&hard_iface->batman_adv_ptype);
  
@@ -54,7 +60,7 @@
  	batadv_info(hard_iface->mesh_iface, "Adding interface: %s\n",
  		    hard_iface->net_dev->name);
  
-@@ -825,6 +828,8 @@
+@@ -826,6 +829,8 @@ void batadv_hardif_disable_interface(struct batadv_hard_iface *hard_iface)
  
  	batadv_info(hard_iface->mesh_iface, "Removing interface: %s\n",
  		    hard_iface->net_dev->name);
@@ -63,9 +69,19 @@
  	dev_remove_pack(&hard_iface->batman_adv_ptype);
  	batadv_hardif_put(hard_iface);
  
---- a/net/batman-adv/mesh-interface.c	2026-02-24 09:23:32.000000000 -0600
-+++ b/net/batman-adv/mesh-interface.c	2026-03-05 18:37:58.449678145 -0600
-@@ -945,6 +945,46 @@
+@@ -887,6 +892,7 @@ batadv_hardif_add_interface(struct net_device *net_dev)
+ 	mutex_init(&hard_iface->bat_iv.ogm_buff_mutex);
+ 	spin_lock_init(&hard_iface->neigh_list_lock);
+ 	kref_init(&hard_iface->refcount);
++	batadv_nss_if_setup(hard_iface);
+ 
+ 	hard_iface->num_bcasts = BATADV_NUM_BCASTS_DEFAULT;
+ 	hard_iface->wifi_flags = batadv_wifi_flags_evaluate(net_dev);
+diff --git a/net/batman-adv/mesh-interface.c b/net/batman-adv/mesh-interface.c
+index 9d72fcdc5d..d7744ae1be 100644
+--- a/net/batman-adv/mesh-interface.c
++++ b/net/batman-adv/mesh-interface.c
+@@ -945,6 +945,46 @@ static const struct {
  	{ "dat_put_rx" },
  	{ "dat_cached_reply_tx" },
  #endif
@@ -112,9 +128,12 @@
  };
  
  static void batadv_get_strings(struct net_device *dev, u32 stringset, u8 *data)
---- /dev/null	2026-02-26 01:46:56.076000000 -0600
-+++ b/net/batman-adv/nss.c	2026-03-05 18:37:58.449678145 -0600
-@@ -0,0 +1,170 @@
+diff --git a/net/batman-adv/nss.c b/net/batman-adv/nss.c
+new file mode 100644
+index 0000000000..57144e8d33
+--- /dev/null
++++ b/net/batman-adv/nss.c
+@@ -0,0 +1,248 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/* Copyright (C) B.A.T.M.A.N. contributors:
 + *
@@ -126,153 +145,38 @@
 +#include <linux/atomic.h>
 +#include <linux/delay.h>
 +#include <linux/jiffies.h>
++#include <linux/workqueue.h>
 +
 +#include <nss_api_if.h>
 +
 +#include "hard-interface.h"
 +#include "nss_internal.h"
 +
-+void batadv_nss_if_init(struct batadv_hard_iface *hard_iface)
++static bool batadv_nss_if_can_create(struct batadv_hard_iface *hard_iface)
 +{
-+	enum nss_dynamic_interface_type src_if_type;
-+	int32_t if_num_h2n;
-+	int32_t src_if_num;
-+	nss_tx_status_t nh_status;
-+	uint32_t nh_if_num;
-+	uint32_t nexthop_h2n;
-+
-+	if (READ_ONCE(hard_iface->nssctx))
-+		return;
-+
-+	if (atomic_cmpxchg(&hard_iface->nssctx_init_in_progress, 0, 1))
-+		return;
-+
-+	if (READ_ONCE(hard_iface->nssctx))
-+		goto out_init_unlock;
-+
 +	if (!batadv_nss_ifname_allowed(hard_iface))
-+		goto out_init_unlock;
++		return false;
 +
 +	if (!batadv_nss_hardif_supported(hard_iface))
-+		goto out_init_unlock;
++		return false;
 +
 +	if (batadv_is_wifi_hardif(hard_iface) &&
 +	    !batadv_nss_offload_wifi_create)
-+		goto out_init_unlock;
++		return false;
 +
-+	hard_iface->nssctx_create_failed = false;
-+	WRITE_ONCE(hard_iface->nssctx_teardown, false);
-+	atomic_set(&hard_iface->nssctx_users, 0);
-+	hard_iface->nssctx_dev_held = false;
-+	hard_iface->nssctx_last_create_jiffies = jiffies;
-+	hard_iface->nssctx_submit_failed = false;
-+	hard_iface->nssctx_last_submit_fail_jiffies = 0;
-+	hard_iface->nss_policy_cache_expires = 0;
-+	hard_iface->nss_policy_ifname_allowed = false;
-+	hard_iface->nss_policy_hardif_supported = false;
-+	hard_iface->nss_policy_wifi_submit_allowed = false;
++	if (!hard_iface->mesh_iface || hard_iface->if_status == BATADV_IF_NOT_IN_USE)
++		return false;
 +
-+	nexthop_h2n = NSS_ETH_RX_INTERFACE;
-+	if_num_h2n = nss_cmn_get_interface_number_by_dev(hard_iface->net_dev);
-+	if (if_num_h2n >= 0)
-+		nexthop_h2n = (uint32_t)if_num_h2n;
++	if (READ_ONCE(hard_iface->nssctx_teardown) ||
++	    READ_ONCE(hard_iface->nssctx))
++		return false;
 +
-+	hard_iface->nssctx = nss_virt_if_create_sync_nexthop(hard_iface->net_dev,
-+							      NSS_N2H_INTERFACE,
-+							      nexthop_h2n);
-+	if (hard_iface->nssctx && if_num_h2n < 0)
-+		pr_debug("Using NSS_ETH_RX_INTERFACE as h2n nexthop for %s\n",
-+			 hard_iface->net_dev->name);
-+	if (!hard_iface->nssctx) {
-+		hard_iface->nssctx_create_failed = true;
-+		pr_warn("Unable to create NSS virtual interface for %s\n",
-+			hard_iface->net_dev->name);
-+	}
-+
-+	if (hard_iface->nssctx)
-+		nss_virt_if_register(hard_iface->nssctx, batadv_nss_receive_from_nss,
-+				     hard_iface->net_dev);
-+	if (hard_iface->nssctx)
-+		hard_iface->nssctx_dev_held = true;
-+
-+	if (!hard_iface->nssctx)
-+		goto out_init_unlock;
-+
-+	src_if_num = if_num_h2n;
-+	if (src_if_num < 0)
-+		goto out_init_unlock;
-+
-+	/*
-+	 * nss_if_set_nexthop() is valid for physical interfaces and VAP dynamic
-+	 * interfaces. For wifi mesh dynamic interfaces the firmware rejects this
-+	 * message (NSS_TX_FAILURE), so skip programming and keep software path.
-+	 */
-+	if (nss_is_dynamic_interface((uint32_t)src_if_num)) {
-+		src_if_type = nss_dynamic_interface_get_type(hard_iface->nssctx->nss_ctx,
-+							    src_if_num);
-+		if (src_if_type != NSS_DYNAMIC_INTERFACE_TYPE_VAP)
-+			goto out_init_unlock;
-+	}
-+
-+	nh_if_num = hard_iface->nssctx->if_num_n2h;
-+	nh_status = nss_if_set_nexthop(hard_iface->nssctx->nss_ctx,
-+				       (uint32_t)src_if_num,
-+				       nh_if_num);
-+	if (nh_status != NSS_TX_SUCCESS)
-+		pr_warn("Unable to set NSS nexthop for %s if_num %d -> %u: %d\n",
-+			hard_iface->net_dev->name, src_if_num, nh_if_num, nh_status);
-+
-+out_init_unlock:
-+	atomic_set(&hard_iface->nssctx_init_in_progress, 0);
++	return true;
 +}
 +
-+void batadv_nss_if_deinit(struct batadv_hard_iface *hard_iface)
++static void batadv_nss_if_put_created(struct batadv_hard_iface *hard_iface,
++				      nss_tx_status_t status)
 +{
-+	struct nss_virt_if_handle *nssctx = hard_iface->nssctx;
-+	int32_t src_if_num;
-+	nss_tx_status_t status;
-+	unsigned int wait_tries = 0;
-+
-+	nssctx = xchg(&hard_iface->nssctx, NULL);
-+
-+	if (!nssctx)
-+		return;
-+	WRITE_ONCE(hard_iface->nssctx_teardown, true);
-+	smp_mb();
-+
-+	hard_iface->nssctx_create_failed = false;
-+	hard_iface->nssctx_last_create_jiffies = 0;
-+	hard_iface->nssctx_submit_failed = false;
-+	hard_iface->nssctx_last_submit_fail_jiffies = 0;
-+	hard_iface->nss_policy_cache_expires = 0;
-+
-+	while (atomic_read(&hard_iface->nssctx_users) > 0 && wait_tries < 5000) {
-+		usleep_range(1000, 2000);
-+		wait_tries++;
-+	}
-+	if (atomic_read(&hard_iface->nssctx_users) > 0) {
-+		WRITE_ONCE(hard_iface->nssctx, nssctx);
-+		WRITE_ONCE(hard_iface->nssctx_teardown, false);
-+		pr_warn("Skipping NSS teardown for %s while %d users still in-flight\n",
-+			hard_iface->net_dev->name,
-+			atomic_read(&hard_iface->nssctx_users));
-+		return;
-+	}
-+
-+	src_if_num = nss_cmn_get_interface_number_by_dev(hard_iface->net_dev);
-+	if (src_if_num >= 0)
-+		nss_if_reset_nexthop(nssctx->nss_ctx, (uint32_t)src_if_num);
-+
-+	for (wait_tries = 0; wait_tries < 4000; wait_tries++) {
-+		status = nss_virt_if_destroy_sync(nssctx);
-+		if (status == NSS_TX_SUCCESS)
-+			break;
-+		usleep_range(2000, 4000);
-+	}
-+	if (status != NSS_TX_SUCCESS)
-+		pr_warn("Unable to destroy NSS virtual interface for %s after %u retries: %d\n",
-+			hard_iface->net_dev->name, wait_tries, status);
-+
 +	if (status == NSS_TX_SUCCESS) {
 +		hard_iface->nssctx_dev_held = false;
 +	} else if (status == NSS_TX_FAILURE_BAD_PARAM &&
@@ -282,12 +186,208 @@
 +		pr_warn("Compensated NSS netdev reference on destroy failure for %s\n",
 +			hard_iface->net_dev->name);
 +	}
-+
-+	WRITE_ONCE(hard_iface->nssctx_teardown, false);
 +}
---- /dev/null	2026-02-26 01:46:56.076000000 -0600
-+++ b/net/batman-adv/nss.h	2026-03-05 18:37:58.449678145 -0600
-@@ -0,0 +1,41 @@
++
++static void batadv_nss_if_init_worker(struct work_struct *work)
++{
++	struct batadv_hard_iface *hard_iface;
++	struct nss_virt_if_handle *nssctx = NULL;
++	enum nss_dynamic_interface_type src_if_type;
++	int32_t if_num_h2n;
++	int32_t src_if_num;
++	nss_tx_status_t destroy_status;
++	nss_tx_status_t nh_status;
++	uint32_t nh_if_num;
++	uint32_t nexthop_h2n;
++
++	hard_iface = container_of(work, struct batadv_hard_iface, nss_init_work);
++
++	if (!batadv_nss_if_can_create(hard_iface))
++		goto out;
++
++	WRITE_ONCE(hard_iface->nssctx_create_failed, false);
++	WRITE_ONCE(hard_iface->nssctx_submit_failed, false);
++	hard_iface->nssctx_dev_held = false;
++	hard_iface->nssctx_last_create_jiffies = jiffies;
++	hard_iface->nssctx_last_submit_fail_jiffies = 0;
++
++	nexthop_h2n = NSS_ETH_RX_INTERFACE;
++	if_num_h2n = nss_cmn_get_interface_number_by_dev(hard_iface->net_dev);
++	if (if_num_h2n >= 0)
++		nexthop_h2n = (uint32_t)if_num_h2n;
++
++	nssctx = nss_virt_if_create_sync_nexthop(hard_iface->net_dev,
++						 NSS_N2H_INTERFACE,
++						 nexthop_h2n);
++	if (nssctx && if_num_h2n < 0)
++		pr_debug("Using NSS_ETH_RX_INTERFACE as h2n nexthop for %s\n",
++			 hard_iface->net_dev->name);
++	if (!nssctx) {
++		WRITE_ONCE(hard_iface->nssctx_create_failed, true);
++		pr_warn("Unable to create NSS virtual interface for %s\n",
++			hard_iface->net_dev->name);
++		goto out;
++	}
++
++	nss_virt_if_register(nssctx, batadv_nss_receive_from_nss,
++			     hard_iface->net_dev);
++	hard_iface->nssctx_dev_held = true;
++
++	if (unlikely(READ_ONCE(hard_iface->nssctx_teardown) ||
++		     READ_ONCE(hard_iface->nssctx))) {
++		destroy_status = nss_virt_if_destroy_sync(nssctx);
++		batadv_nss_if_put_created(hard_iface, destroy_status);
++		goto out;
++	}
++
++	WRITE_ONCE(hard_iface->nssctx, nssctx);
++
++	src_if_num = if_num_h2n;
++	if (src_if_num < 0)
++		goto out;
++
++	/*
++	 * nss_if_set_nexthop() is valid for physical interfaces and VAP dynamic
++	 * interfaces. For wifi mesh dynamic interfaces the firmware rejects this
++	 * message (NSS_TX_FAILURE), so skip programming and keep software path.
++	 */
++	if (nss_is_dynamic_interface((uint32_t)src_if_num)) {
++		src_if_type = nss_dynamic_interface_get_type(nssctx->nss_ctx,
++							    src_if_num);
++		if (src_if_type != NSS_DYNAMIC_INTERFACE_TYPE_VAP)
++			goto out;
++	}
++
++	nh_if_num = nssctx->if_num_n2h;
++	nh_status = nss_if_set_nexthop(nssctx->nss_ctx,
++				       (uint32_t)src_if_num,
++				       nh_if_num);
++	if (nh_status != NSS_TX_SUCCESS)
++		pr_warn("Unable to set NSS nexthop for %s if_num %d -> %u: %d\n",
++			hard_iface->net_dev->name, src_if_num, nh_if_num, nh_status);
++
++out:
++	atomic_set(&hard_iface->nssctx_init_in_progress, 0);
++	batadv_hardif_put(hard_iface);
++}
++
++static void batadv_nss_if_deinit_worker(struct work_struct *work)
++{
++	struct batadv_hard_iface *hard_iface;
++	struct nss_virt_if_handle *nssctx;
++	int32_t src_if_num;
++	nss_tx_status_t status = NSS_TX_SUCCESS;
++	unsigned int wait_tries = 0;
++
++	hard_iface = container_of(to_delayed_work(work), struct batadv_hard_iface,
++				 nss_deinit_work);
++	nssctx = READ_ONCE(hard_iface->nssctx_destroy);
++	if (!nssctx)
++		goto out;
++
++	while (atomic_read(&hard_iface->nssctx_users) > 0 && wait_tries < 250) {
++		usleep_range(1000, 2000);
++		wait_tries++;
++	}
++	if (atomic_read(&hard_iface->nssctx_users) > 0) {
++		mod_delayed_work(system_wq, &hard_iface->nss_deinit_work,
++				 msecs_to_jiffies(20));
++		return;
++	}
++
++	src_if_num = nss_cmn_get_interface_number_by_dev(hard_iface->net_dev);
++	if (src_if_num >= 0)
++		nss_if_reset_nexthop(nssctx->nss_ctx, (uint32_t)src_if_num);
++
++	status = nss_virt_if_destroy_sync(nssctx);
++	if (status != NSS_TX_SUCCESS &&
++	    status != NSS_TX_FAILURE_BAD_PARAM &&
++	    hard_iface->nssctx_destroy_tries++ < 31) {
++		mod_delayed_work(system_wq, &hard_iface->nss_deinit_work,
++				 msecs_to_jiffies(20));
++		return;
++	}
++	if (status != NSS_TX_SUCCESS)
++		pr_warn("Unable to destroy NSS virtual interface for %s after %u retries: %d\n",
++			hard_iface->net_dev->name, hard_iface->nssctx_destroy_tries,
++			status);
++
++	batadv_nss_if_put_created(hard_iface, status);
++	WRITE_ONCE(hard_iface->nssctx_destroy, NULL);
++	hard_iface->nssctx_destroy_tries = 0;
++
++out:
++	WRITE_ONCE(hard_iface->nssctx_teardown, false);
++	atomic_set(&hard_iface->nssctx_deinit_in_progress, 0);
++	batadv_hardif_put(hard_iface);
++}
++
++void batadv_nss_if_setup(struct batadv_hard_iface *hard_iface)
++{
++	INIT_WORK(&hard_iface->nss_init_work, batadv_nss_if_init_worker);
++	INIT_DELAYED_WORK(&hard_iface->nss_deinit_work,
++			  batadv_nss_if_deinit_worker);
++	atomic_set(&hard_iface->nssctx_users, 0);
++	atomic_set(&hard_iface->nssctx_init_in_progress, 0);
++	atomic_set(&hard_iface->nssctx_deinit_in_progress, 0);
++	hard_iface->nssctx_destroy_tries = 0;
++	hard_iface->nss_policy_gen = 0;
++}
++
++void batadv_nss_if_init(struct batadv_hard_iface *hard_iface)
++{
++	if (READ_ONCE(hard_iface->nssctx) || READ_ONCE(hard_iface->nssctx_teardown))
++		return;
++
++	if (atomic_cmpxchg(&hard_iface->nssctx_init_in_progress, 0, 1))
++		return;
++
++	kref_get(&hard_iface->refcount);
++	if (!schedule_work(&hard_iface->nss_init_work)) {
++		atomic_set(&hard_iface->nssctx_init_in_progress, 0);
++		batadv_hardif_put(hard_iface);
++	}
++}
++
++void batadv_nss_if_deinit(struct batadv_hard_iface *hard_iface)
++{
++	if (cancel_work_sync(&hard_iface->nss_init_work)) {
++		atomic_set(&hard_iface->nssctx_init_in_progress, 0);
++		batadv_hardif_put(hard_iface);
++	}
++
++	if (atomic_cmpxchg(&hard_iface->nssctx_deinit_in_progress, 0, 1))
++		return;
++
++	WRITE_ONCE(hard_iface->nssctx_teardown, true);
++	smp_mb();
++
++	WRITE_ONCE(hard_iface->nssctx_create_failed, false);
++	hard_iface->nssctx_last_create_jiffies = 0;
++	WRITE_ONCE(hard_iface->nssctx_submit_failed, false);
++	hard_iface->nssctx_last_submit_fail_jiffies = 0;
++	hard_iface->nssctx_destroy_tries = 0;
++	WRITE_ONCE(hard_iface->nssctx_destroy, xchg(&hard_iface->nssctx, NULL));
++	if (!READ_ONCE(hard_iface->nssctx_destroy)) {
++		WRITE_ONCE(hard_iface->nssctx_teardown, false);
++		atomic_set(&hard_iface->nssctx_deinit_in_progress, 0);
++		return;
++	}
++
++	kref_get(&hard_iface->refcount);
++	if (!schedule_delayed_work(&hard_iface->nss_deinit_work, 0)) {
++		WRITE_ONCE(hard_iface->nssctx_destroy, NULL);
++		WRITE_ONCE(hard_iface->nssctx_teardown, false);
++		atomic_set(&hard_iface->nssctx_deinit_in_progress, 0);
++		batadv_hardif_put(hard_iface);
++	}
++}
+diff --git a/net/batman-adv/nss.h b/net/batman-adv/nss.h
+new file mode 100644
+index 0000000000..07daf97302
+--- /dev/null
++++ b/net/batman-adv/nss.h
+@@ -0,0 +1,47 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/* Copyright (C) B.A.T.M.A.N. contributors:
 + *
@@ -300,12 +400,18 @@
 +#include "main.h"
 +
 +#ifdef CONFIG_BATMAN_ADV_NSS
++void batadv_nss_if_setup(struct batadv_hard_iface *hard_iface);
 +void batadv_nss_if_init(struct batadv_hard_iface *hard_iface);
 +void batadv_nss_if_deinit(struct batadv_hard_iface *hard_iface);
 +bool batadv_nss_xmit(struct sk_buff *skb,
 +		     struct batadv_hard_iface *hard_iface,
 +		     const u8 *dst_addr, int *ret);
 +#else
++static inline void batadv_nss_if_setup(struct batadv_hard_iface *hard_iface)
++{
++	(void)hard_iface;
++}
++
 +static inline void batadv_nss_if_init(struct batadv_hard_iface *hard_iface)
 +{
 +	(void)hard_iface;
@@ -329,9 +435,12 @@
 +#endif
 +
 +#endif /* _NET_BATMAN_ADV_NSS_H_ */
---- /dev/null	2026-02-26 01:46:56.076000000 -0600
-+++ b/net/batman-adv/nss_internal.h	2026-03-05 18:37:58.449678145 -0600
-@@ -0,0 +1,77 @@
+diff --git a/net/batman-adv/nss_internal.h b/net/batman-adv/nss_internal.h
+new file mode 100644
+index 0000000000..1461fd48a8
+--- /dev/null
++++ b/net/batman-adv/nss_internal.h
+@@ -0,0 +1,75 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/* Copyright (C) B.A.T.M.A.N. contributors */
 +
@@ -344,6 +453,7 @@
 +#include <linux/jiffies.h>
 +#include <linux/types.h>
 +
++extern atomic_t batadv_nss_policy_gen;
 +extern bool batadv_nss_offload_enable;
 +extern bool batadv_nss_offload_allow_mcast;
 +extern bool batadv_nss_offload_nonlinear_copy;
@@ -356,8 +466,6 @@
 +
 +extern bool batadv_nss_offload_wifi_submit;
 +extern bool batadv_nss_offload_wifi_create;
-+
-+#define BATADV_NSS_OFFLOAD_POLICY_CACHE_MS_DEFAULT 1000
 +
 +enum batadv_nss_wifi_policy_reason {
 +	BATADV_NSS_WIFI_POLICY_OK = 0,
@@ -385,11 +493,10 @@
 +bool batadv_nss_lazy_retry_allowed(struct batadv_hard_iface *hard_iface);
 +void batadv_nss_policy_cache_refresh(struct batadv_hard_iface *hard_iface);
 +
-+static inline bool
-+batadv_nss_policy_cache_valid(struct batadv_hard_iface *hard_iface,
-+			      unsigned long now)
++static inline bool batadv_nss_policy_cache_valid(struct batadv_hard_iface *hard_iface)
 +{
-+	return time_before(now, READ_ONCE(hard_iface->nss_policy_cache_expires));
++	return READ_ONCE(hard_iface->nss_policy_gen) ==
++	       (unsigned int)atomic_read(&batadv_nss_policy_gen);
 +}
 +
 +static inline bool batadv_nss_direct_submit_active(void)
@@ -409,9 +516,12 @@
 +				  const struct batadv_nss_wifi_policy_result *result);
 +
 +#endif /* _NET_BATMAN_ADV_NSS_INTERNAL_H_ */
---- /dev/null	2026-02-26 01:46:56.076000000 -0600
-+++ b/net/batman-adv/nss_policy.c	2026-03-05 18:37:58.449678145 -0600
-@@ -0,0 +1,347 @@
+diff --git a/net/batman-adv/nss_policy.c b/net/batman-adv/nss_policy.c
+new file mode 100644
+index 0000000000..06eda5d997
+--- /dev/null
++++ b/net/batman-adv/nss_policy.c
+@@ -0,0 +1,400 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/* Copyright (C) B.A.T.M.A.N. contributors */
 +
@@ -427,13 +537,67 @@
 +
 +#include "hard-interface.h"
 +
++atomic_t batadv_nss_policy_gen = ATOMIC_INIT(1);
++
 +bool batadv_nss_offload_enable = true;
 +module_param_named(nss_offload_enable, batadv_nss_offload_enable, bool, 0644);
 +MODULE_PARM_DESC(nss_offload_enable,
 +		 "Enable batman-adv NSS datapath offload attempts");
 +
-+static char *batadv_nss_offload_ifname = "";
-+module_param_named(nss_offload_ifname, batadv_nss_offload_ifname, charp, 0644);
++#define BATADV_NSS_IFNAME_LIST_LEN 256
++
++static void batadv_nss_policy_invalidate(void)
++{
++	atomic_inc(&batadv_nss_policy_gen);
++}
++
++static int batadv_nss_param_set_bool_invalidate(const char *val,
++						const struct kernel_param *kp)
++{
++	int ret;
++
++	ret = param_set_bool(val, kp);
++	if (!ret)
++		batadv_nss_policy_invalidate();
++
++	return ret;
++}
++
++static const struct kernel_param_ops batadv_nss_param_ops_bool_invalidate = {
++	.set = batadv_nss_param_set_bool_invalidate,
++	.get = param_get_bool,
++};
++
++static int batadv_nss_param_set_ifname_invalidate(const char *val,
++						  const struct kernel_param *kp)
++{
++	char *ifname_list = (char *)val;
++	size_t ifname_len = strlen(ifname_list);
++	int ret;
++
++	if (ifname_len > 0 && ifname_list[ifname_len - 1] == '\n')
++		ifname_list[ifname_len - 1] = '\0';
++
++	ret = param_set_copystring(ifname_list, kp);
++	if (!ret)
++		batadv_nss_policy_invalidate();
++
++	return ret;
++}
++
++static const struct kernel_param_ops batadv_nss_param_ops_ifname_invalidate = {
++	.set = batadv_nss_param_set_ifname_invalidate,
++	.get = param_get_string,
++};
++
++static char batadv_nss_offload_ifname[BATADV_NSS_IFNAME_LIST_LEN];
++static struct kparam_string batadv_nss_param_string_ifname = {
++	.maxlen = sizeof(batadv_nss_offload_ifname),
++	.string = batadv_nss_offload_ifname,
++};
++
++module_param_cb(nss_offload_ifname, &batadv_nss_param_ops_ifname_invalidate,
++		&batadv_nss_param_string_ifname, 0644);
 +MODULE_PARM_DESC(nss_offload_ifname,
 +		 "Restrict NSS offload attempts to comma-separated hardif names");
 +
@@ -443,11 +607,9 @@
 +
 +unsigned int batadv_nss_offload_submit_retry_ms = 3000;
 +
-+static unsigned int batadv_nss_offload_policy_cache_ms =
-+	BATADV_NSS_OFFLOAD_POLICY_CACHE_MS_DEFAULT;
-+
 +static bool batadv_nss_offload_allow_eth = true;
-+module_param_named(nss_offload_allow_eth, batadv_nss_offload_allow_eth, bool, 0644);
++module_param_cb(nss_offload_allow_eth, &batadv_nss_param_ops_bool_invalidate,
++		&batadv_nss_offload_allow_eth, 0644);
 +MODULE_PARM_DESC(nss_offload_allow_eth,
 +		 "Allow batman-adv NSS offload attempts on ethernet hardifs");
 +
@@ -462,7 +624,8 @@
 +#endif
 +
 +static bool batadv_nss_offload_allow_wifi = true;
-+module_param_named(nss_offload_allow_wifi, batadv_nss_offload_allow_wifi, bool, 0644);
++module_param_cb(nss_offload_allow_wifi, &batadv_nss_param_ops_bool_invalidate,
++		&batadv_nss_offload_allow_wifi, 0644);
 +MODULE_PARM_DESC(nss_offload_allow_wifi,
 +		 "Allow batman-adv NSS offload attempts on wifi hardifs");
 +
@@ -476,9 +639,15 @@
 +	BIT(BATADV_P_DAT_DHT_PUT) |
 +	BIT(BATADV_P_DAT_CACHE_REPLY);
 +
-+static char *batadv_nss_offload_wifi_ifname = "";
-+module_param_named(nss_offload_wifi_ifname, batadv_nss_offload_wifi_ifname,
-+		   charp, 0644);
++static char batadv_nss_offload_wifi_ifname[BATADV_NSS_IFNAME_LIST_LEN];
++static struct kparam_string batadv_nss_param_string_wifi_ifname = {
++	.maxlen = sizeof(batadv_nss_offload_wifi_ifname),
++	.string = batadv_nss_offload_wifi_ifname,
++};
++
++module_param_cb(nss_offload_wifi_ifname,
++		&batadv_nss_param_ops_ifname_invalidate,
++		&batadv_nss_param_string_wifi_ifname, 0644);
 +MODULE_PARM_DESC(nss_offload_wifi_ifname,
 +		 "Restrict wifi NSS offload to comma-separated hardif names");
 +
@@ -562,9 +731,7 @@
 +
 +void batadv_nss_policy_cache_refresh(struct batadv_hard_iface *hard_iface)
 +{
-+	unsigned int cache_ms = batadv_nss_offload_policy_cache_ms;
 +	const bool is_wifi = batadv_is_wifi_hardif(hard_iface);
-+	unsigned long ttl;
 +
 +	hard_iface->nss_policy_ifname_allowed = batadv_nss_ifname_allowed(hard_iface);
 +	if (is_wifi) {
@@ -581,12 +748,8 @@
 +			batadv_nss_offload_allow_eth;
 +		hard_iface->nss_policy_wifi_submit_allowed = true;
 +	}
-+
-+	if (!cache_ms)
-+		cache_ms = BATADV_NSS_OFFLOAD_POLICY_CACHE_MS_DEFAULT;
-+
-+	ttl = msecs_to_jiffies(cache_ms);
-+	WRITE_ONCE(hard_iface->nss_policy_cache_expires, jiffies + ttl);
++	WRITE_ONCE(hard_iface->nss_policy_gen,
++		   (unsigned int)atomic_read(&batadv_nss_policy_gen));
 +}
 +
 +bool batadv_nss_lazy_retry_allowed(struct batadv_hard_iface *hard_iface)
@@ -759,8 +922,11 @@
 +		break;
 +	}
 +}
---- /dev/null	2026-02-26 01:46:56.076000000 -0600
-+++ b/net/batman-adv/nss_rx.c	2026-03-05 18:37:58.449678145 -0600
+diff --git a/net/batman-adv/nss_rx.c b/net/batman-adv/nss_rx.c
+new file mode 100644
+index 0000000000..f7528c9a25
+--- /dev/null
++++ b/net/batman-adv/nss_rx.c
 @@ -0,0 +1,82 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/* Copyright (C) B.A.T.M.A.N. contributors */
@@ -844,9 +1010,12 @@
 +		atomic_dec(&hard_iface->nssctx_users);
 +	batadv_hardif_put(hard_iface);
 +}
---- /dev/null	2026-02-26 01:46:56.076000000 -0600
-+++ b/net/batman-adv/nss_tx.c	2026-03-05 18:37:58.449678145 -0600
-@@ -0,0 +1,281 @@
+diff --git a/net/batman-adv/nss_tx.c b/net/batman-adv/nss_tx.c
+new file mode 100644
+index 0000000000..aa93ededc5
+--- /dev/null
++++ b/net/batman-adv/nss_tx.c
+@@ -0,0 +1,280 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/* Copyright (C) B.A.T.M.A.N. contributors */
 +
@@ -918,7 +1087,7 @@
 +	struct batadv_priv *bat_priv = NULL;
 +	struct batadv_nss_wifi_policy_result wifi_result;
 +	struct nss_virt_if_handle *nssctx;
-+	unsigned long now, retry_j;
++	unsigned long retry_j;
 +	bool nonlinear_copy;
 +	struct sk_buff *nss_skb;
 +	const bool is_wifi = batadv_is_wifi_hardif(hard_iface);
@@ -934,17 +1103,21 @@
 +		return false;
 +	}
 +
-+	now = jiffies;
-+	if (unlikely(!batadv_nss_policy_cache_valid(hard_iface, now)))
++	if (unlikely(!batadv_nss_policy_cache_valid(hard_iface)))
 +		batadv_nss_policy_cache_refresh(hard_iface);
 +
++	nssctx = READ_ONCE(hard_iface->nssctx);
 +	if (unlikely(!hard_iface->nss_policy_ifname_allowed)) {
++		if (nssctx)
++			batadv_nss_if_deinit(hard_iface);
 +		if (bat_priv)
 +			batadv_inc_counter(bat_priv, BATADV_CNT_NSS_TX_BYPASS_IFNAME);
 +		return false;
 +	}
 +
 +	if (unlikely(!hard_iface->nss_policy_hardif_supported)) {
++		if (nssctx)
++			batadv_nss_if_deinit(hard_iface);
 +		if (bat_priv) {
 +			if (is_wifi) {
 +				batadv_inc_counter(bat_priv, BATADV_CNT_NSS_TX_BYPASS_WIFI);
@@ -958,25 +1131,21 @@
 +		return false;
 +	}
 +
-+	nssctx = READ_ONCE(hard_iface->nssctx);
 +	if (unlikely(!nssctx)) {
 +		if (batadv_nss_offload_lazy_init &&
 +		    batadv_nss_lazy_retry_allowed(hard_iface))
 +			batadv_nss_if_init(hard_iface);
 +
-+		nssctx = READ_ONCE(hard_iface->nssctx);
-+		if (unlikely(!nssctx)) {
-+			if (bat_priv) {
-+				batadv_inc_counter(bat_priv, BATADV_CNT_NSS_TX_BYPASS_NOCTX);
-+				if (READ_ONCE(hard_iface->nssctx_create_failed))
-+					batadv_inc_counter(bat_priv,
-+							   BATADV_CNT_NSS_TX_BYPASS_NOCTX_CREATE_FAIL);
-+				else
-+					batadv_inc_counter(bat_priv,
-+							   BATADV_CNT_NSS_TX_BYPASS_NOCTX_INIT);
-+			}
-+			return false;
++		if (bat_priv) {
++			batadv_inc_counter(bat_priv, BATADV_CNT_NSS_TX_BYPASS_NOCTX);
++			if (READ_ONCE(hard_iface->nssctx_create_failed))
++				batadv_inc_counter(bat_priv,
++						   BATADV_CNT_NSS_TX_BYPASS_NOCTX_CREATE_FAIL);
++			else
++				batadv_inc_counter(bat_priv,
++						   BATADV_CNT_NSS_TX_BYPASS_NOCTX_INIT);
 +		}
++		return false;
 +	}
 +
 +	if (unlikely(READ_ONCE(hard_iface->nssctx_submit_failed))) {
@@ -1085,8 +1254,7 @@
 +		return false;
 +	}
 +
-+	if (nonlinear_copy && skb_is_nonlinear(nss_skb) &&
-+	    skb_linearize(nss_skb)) {
++	if (nonlinear_copy && skb_linearize(nss_skb)) {
 +		kfree_skb(nss_skb);
 +		if (bat_priv) {
 +			batadv_inc_counter(bat_priv, BATADV_CNT_NSS_TX_BYPASS_NONLINEAR);
@@ -1128,8 +1296,10 @@
 +	*ret = NET_XMIT_SUCCESS;
 +	return true;
 +}
---- a/net/batman-adv/send.c	2026-02-24 09:23:32.000000000 -0600
-+++ b/net/batman-adv/send.c	2026-03-05 18:37:58.449678145 -0600
+diff --git a/net/batman-adv/send.c b/net/batman-adv/send.c
+index 20d85c6810..2b8d510c23 100644
+--- a/net/batman-adv/send.c
++++ b/net/batman-adv/send.c
 @@ -34,6 +34,7 @@
  #include "hard-interface.h"
  #include "log.h"
@@ -1138,7 +1308,7 @@
  #include "originator.h"
  #include "routing.h"
  #include "translation-table.h"
-@@ -93,6 +94,10 @@
+@@ -93,6 +94,10 @@ int batadv_send_skb_packet(struct sk_buff *skb,
  
  	skb->dev = hard_iface->net_dev;
  
@@ -1149,8 +1319,10 @@
  	/* dev_queue_xmit() returns a negative result on error.	 However on
  	 * congestion and traffic shaping, it drops and returns NET_XMIT_DROP
  	 * (which is > 0). This will not be treated as an error.
---- a/net/batman-adv/types.h	2026-02-24 09:23:32.000000000 -0600
-+++ b/net/batman-adv/types.h	2026-03-05 18:37:58.449678145 -0600
+diff --git a/net/batman-adv/types.h b/net/batman-adv/types.h
+index 8fc5fe0e9b..7f4e9e2e7b 100644
+--- a/net/batman-adv/types.h
++++ b/net/batman-adv/types.h
 @@ -30,6 +30,10 @@
  #include <uapi/linux/batadv_packet.h>
  #include <uapi/linux/batman_adv.h>
@@ -1162,7 +1334,7 @@
  #ifdef CONFIG_BATMAN_ADV_DAT
  
  /**
-@@ -224,6 +228,49 @@
+@@ -224,6 +228,62 @@ struct batadv_hard_iface {
  	struct batadv_hard_iface_bat_v bat_v;
  #endif
  
@@ -1170,17 +1342,29 @@
 +	/** @nssctx: NSS virtual interface context for this hard-interface */
 +	struct nss_virt_if_handle *nssctx;
 +
++	/** @nssctx_destroy: NSS virtual interface context pending destruction */
++	struct nss_virt_if_handle *nssctx_destroy;
++
 +	/** @nssctx_teardown: true while NSS context teardown is in progress */
 +	bool nssctx_teardown;
 +
 +	/** @nssctx_users: in-flight NSS TX users of @nssctx */
 +	atomic_t nssctx_users;
 +
++	/** @nss_init_work: asynchronous NSS context creation work */
++	struct work_struct nss_init_work;
++
++	/** @nss_deinit_work: asynchronous NSS context destruction work */
++	struct delayed_work nss_deinit_work;
++
 +	/** @nssctx_dev_held: true if NSS create path took a netdev reference */
 +	bool nssctx_dev_held;
 +
 +	/** @nssctx_init_in_progress: serialized NSS context creation */
 +	atomic_t nssctx_init_in_progress;
++
++	/** @nssctx_deinit_in_progress: serialized NSS context teardown */
++	atomic_t nssctx_deinit_in_progress;
 +
 +	/** @nssctx_create_failed: last NSS virtual interface create attempt failed */
 +	bool nssctx_create_failed;
@@ -1194,8 +1378,11 @@
 +	/** @nssctx_last_submit_fail_jiffies: jiffies timestamp of last submit fail */
 +	unsigned long nssctx_last_submit_fail_jiffies;
 +
-+	/** @nss_policy_cache_expires: jiffies deadline for policy cache refresh */
-+	unsigned long nss_policy_cache_expires;
++	/** @nssctx_destroy_tries: teardown worker retries for NSS context destroy */
++	unsigned int nssctx_destroy_tries;
++
++	/** @nss_policy_gen: generation of cached NSS policy state */
++	unsigned int nss_policy_gen;
 +
 +	/** @nss_policy_ifname_allowed: cached result of ifname policy */
 +	bool nss_policy_ifname_allowed;
@@ -1205,14 +1392,12 @@
 +
 +	/** @nss_policy_wifi_submit_allowed: cached wifi submit gate state */
 +	bool nss_policy_wifi_submit_allowed;
-+
-+
 +#endif
 +
  	/**
  	 * @neigh_list: list of unique single hop neighbors via this interface
  	 */
-@@ -936,6 +990,123 @@
+@@ -936,6 +996,123 @@ enum batadv_counters {
  	BATADV_CNT_DAT_CACHED_REPLY_TX,
  #endif
  
